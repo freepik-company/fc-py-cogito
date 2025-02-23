@@ -37,19 +37,17 @@ python app.py
 
 ## Usage Guide: Cogito CLI
 
-The **Cogito CLI** provides several commands to initialize, scaffold, and run your inference-based projects. This guide explains the available commands and their options.
+The **Cogito CLI** provides several commands to initialize, scaffold, and run your inference-based projects.
 
----
-
-## CLI Reference
+# CLI Reference
 
 - [Commands](#commands)
   - [Initialize](#initialize)
   - [Scaffold](#scaffold)
   - [Run](#run)
-
+  - [Version](#version)
+  - [Help](#help)
 ---
-
 
 ### Initialize
 
@@ -142,4 +140,34 @@ This will:
 - Load the application based on the `cogito.yaml` file.
 - Start the FastAPI server for your inference service.
 
----
+### Version
+
+Command: `version`
+
+**Description:** Show the current version of Cogito.
+
+#### Usage:
+
+```bash
+cogito-cli version
+```
+
+**Example:**
+
+```bash
+cogito-cli version
+# Cogito version X.Y.Z
+```
+
+## Help
+
+Command: `help`
+
+**Description:** Show the help message for the cogito-cli.
+
+#### Usage:
+
+```bash
+cogito-cli help
+# Show the help message for the cogito-cli.
+```
