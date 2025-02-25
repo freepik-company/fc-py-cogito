@@ -27,10 +27,10 @@ def test_init_default(runner, clean_config):
     result = runner.invoke(init, ["--default"])
     assert result.exit_code == 0
     assert "Initializing..." in result.output
-    assert os.path.exists("cogito.yaml")
+    assert os.path.exists("./cogito.yaml")
 
     # Verify config file was created with default values as per cogito.yaml
-    config = ConfigFile.load_from_file("cogito.yaml")
+    config = ConfigFile.load_from_file("./cogito.yaml")
 
     # Server-level defaults
     assert config.cogito.server.name == "Cogito ergo sum"
@@ -75,7 +75,7 @@ def test_init_prompted(runner, clean_config):
     assert os.path.exists("cogito.yaml")
 
     # Verify config file was created with prompted values
-    config = ConfigFile.load_from_file("cogito.yaml")
+    config = ConfigFile.load_from_file("./cogito.yaml")
     assert config.cogito.server.name == "Test Project"
     assert config.cogito.server.description == "Test Description"
     assert config.cogito.server.version == "0.1.0"
