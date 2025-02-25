@@ -1,9 +1,11 @@
 import json
 import os
 import sys
+import time
 
 import click
 
+from cogito.api.responses import ResultResponse
 from cogito.core.config import ConfigFile
 from cogito.core.exceptions import ConfigFileNotFoundError
 from cogito.core.utils import load_predictor
@@ -34,15 +36,21 @@ def predict(ctx, payload):
         predictor_instance = load_predictor(predictor)
 
         payload_data = json.loads(payload)
-        result = predictor_instance.predict(**payload_data)
 
-        if isinstance(result, str):
-            click.echo(result)
-        else:
-            try:
-                click.echo(json.dumps(result, indent=4))
-            except TypeError:
-                click.echo(json.dumps(result.__dict__, indent=4))
+        start_time = time.time()
+        result = predictor_instance.predict(**payload_data)
+        end_time = time.time()
+
+        try:
+            response = ResultResponse(
+                inference_time_seconds=round(float(end_time - start_time), 2),
+                input=payload_data,
+                result=result,
+            )
+            click.echo(response.model_dump_json(indent=4))
+        except TypeError:
+            click.echo("Error: Unable to serialize the response to JSON.", err=True)
+            exit(1)
     except Exception as e:
         click.echo(f"Error: {e}", err=True, color=True)
         exit(1)
