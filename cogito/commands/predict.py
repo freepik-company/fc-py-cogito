@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import sys
@@ -34,24 +35,35 @@ def predict(ctx, payload):
         exit(1)
 
     try:
+        # Load predictor instance using the path to the cogito.yaml file
         sys.path.insert(0, app_dir)
         predictor = config.cogito.server.route.predictor
         predictor_instance = load_predictor(predictor)
 
+        # Run setup method asynchronously
+        asyncio.run(predictor_instance.setup())
+
+        # Create input model from payload
         payload_data = json.loads(payload)
         _, input_model_class = create_request_model(
             predictor, predictor_instance.predict
         )
         input_model = input_model_class(**payload_data)
 
+        # Get response model type
         response_model = get_predictor_handler_return_type(predictor_instance)
 
+        # Wrap handler with response model
         handler = wrap_handler(
             descriptor=predictor,
             original_handler=predictor_instance.predict,
             response_model=response_model,
         )
+
+        # Call handler with input model
         response = handler(input_model)
+
+        # Print response in JSON format
         click.echo(response.model_dump_json(indent=4))
     except Exception as e:
         # print stack trace

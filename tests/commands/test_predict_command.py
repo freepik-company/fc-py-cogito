@@ -10,6 +10,14 @@ from cogito.core.exceptions import ConfigFileNotFoundError
 
 
 class MockPredictor:
+    def __init__(self):
+        self.setup_called = False
+
+    async def setup(self):
+        """Mock setup method that would normally initialize resources"""
+        self.setup_called = True
+        return True
+
     def predict(self, prompt: str, temperature: float = 0.5):
         return f"Generated text for '{prompt}' with temperature {temperature}"
 
@@ -51,6 +59,9 @@ class TestPredictCommand(unittest.TestCase):
 
         # Setup predictor instance
         self.mock_predictor = MockPredictor()
+
+        # Add a spy to the setup method
+        self.mock_predictor.setup = mock.MagicMock(wraps=self.mock_predictor.setup)
 
         # Create a mock input model class
         self.mock_input_model_class = mock.MagicMock()
@@ -101,6 +112,9 @@ class TestPredictCommand(unittest.TestCase):
         # Verify results
         self.assertEqual(result.exit_code, 0)
         self.assertIn("Generated text for 'A cow' with temperature 0.2", result.output)
+
+        # Verify setup was called
+        self.mock_predictor.setup.assert_called_once()
 
         # Verify function calls
         mock_load_config.assert_called_once_with("/fake/path/cogito.yaml")
@@ -177,6 +191,26 @@ class TestPredictCommand(unittest.TestCase):
         # Verify results
         self.assertEqual(result.exit_code, 1)
         self.assertIn("Error: Handler error", result.output)
+
+    @mock.patch("cogito.commands.predict.ConfigFile.load_from_file")
+    @mock.patch("cogito.commands.predict.load_predictor")
+    def test_predict_command_setup_error(self, mock_load_predictor, mock_load_config):
+        # Configure mocks
+        mock_load_config.return_value = self.mock_config
+        mock_predictor = MockPredictor()
+        mock_predictor.setup = mock.MagicMock(side_effect=Exception("Setup failed"))
+        mock_load_predictor.return_value = mock_predictor
+
+        # Run command
+        result = self.runner.invoke(
+            predict,
+            ["--payload", '{"prompt": "A cow", "temperature": 0.2}'],
+            obj={"config_path": "/fake/path/cogito.yaml"},
+        )
+
+        # Verify results
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Error: Setup failed", result.output)
 
 
 if __name__ == "__main__":
