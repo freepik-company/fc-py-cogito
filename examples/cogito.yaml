@@ -11,10 +11,6 @@ cogito:
       port: 8000
     name: Cogito ergo sum
     route:
-      args:
-        - description: The prompt to generate text from
-          name: prompt
-          type: str
       description: Make a single prediction
       name: Predict
       path: /v1/predict

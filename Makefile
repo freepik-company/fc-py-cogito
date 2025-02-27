@@ -79,7 +79,7 @@ run-test: .venv dependencies-dev-install ## Run the tests
 ##@ Install
 
 install: ## Install the package
-	@pip install -e .
+	@. .venv/bin/activate && pip install -e .
 
 ##@ Release commands
 

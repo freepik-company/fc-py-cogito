@@ -41,16 +41,14 @@ class Application:
 
     def __init__(
         self,
-        config_file_path: str = ".",
+        config_file_path: str = "./cogito.yaml",
         logger: Union[Any, logging.Logger] = None,
     ):
 
         self._logger = logger or Application._get_default_logger()
 
         try:
-            self.config = ConfigFile.load_from_file(
-                os.path.join(f"{config_file_path}/cogito.yaml")
-            )
+            self.config = ConfigFile.load_from_file(os.path.join(f"{config_file_path}"))
         except ConfigFileNotFoundError as e:
             self._logger.warning(
                 "config file does not exist. Using default configuration.",

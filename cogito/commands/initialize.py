@@ -128,10 +128,12 @@ def init(
     ctx, scaffold: bool = False, default: bool = False, force: bool = False
 ) -> None:
     """Initialize the project configuration"""
-    config_path = ctx.obj.get("config_path", ".") if ctx.obj else "."
+    config_path = (
+        ctx.obj.get("config_path", "./cogito.yaml") if ctx.obj else "./cogito.yaml"
+    )
     click.echo("Initializing...")
 
-    if ConfigFile.exists(f"{config_path}/cogito.yaml") and not force:
+    if ConfigFile.exists(f"{config_path}") and not force:
         click.echo("Already initialized.")
         return
 
@@ -143,5 +145,5 @@ def init(
     if scaffold:
         scaffold_predict_classes(config, force)
 
-    config.save_to_file(f"{config_path}/cogito.yaml")
+    config.save_to_file(f"{config_path}")
     click.echo("Initialized successfully.")

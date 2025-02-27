@@ -60,9 +60,8 @@ def scaffold(ctx, force: bool = False) -> None:
 
     click.echo("Generating predict classes...")
 
-    # TODO: cogito.yaml file name should not be mandatory in the application
     try:
-        config = ConfigFile.load_from_file(f"{config_path}/cogito.yaml")
+        config = ConfigFile.load_from_file(f"{config_path}")
     except ConfigFileNotFoundError:
         click.echo("No configuration file found. Please initialize the project first.")
         return
