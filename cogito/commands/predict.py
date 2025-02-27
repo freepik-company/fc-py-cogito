@@ -39,10 +39,10 @@ def predict(ctx, payload):
         predictor_instance = load_predictor(predictor)
 
         payload_data = json.loads(payload)
-        _, input_mode_class = create_request_model(
+        _, input_model_class = create_request_model(
             predictor, predictor_instance.predict
         )
-        input_model = input_mode_class(**payload_data)
+        input_model = input_model_class(**payload_data)
 
         response_model = get_predictor_handler_return_type(predictor_instance)
 
