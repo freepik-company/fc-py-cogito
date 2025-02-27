@@ -69,21 +69,7 @@ def wrap_handler(
     response_model: ResultResponse,
     semaphore: asyncio.Semaphore = None,
 ) -> Callable:
-    sig = signature(original_handler)
-    type_hints = get_type_hints(original_handler)
-
-    _, class_name = descriptor.split(":")
-
-    input_fields = {}
-    for name, param in sig.parameters.items():
-        param_type = type_hints.get(name, Any)
-        default_value = param.default if param.default != Parameter.empty else ...
-        print(f"default_value: {default_value}")
-        if not isinstance(default_value, type(...)):  # Comprueba si no es Ellipsis
-            if isinstance(default_value, Field):
-                default_value = default_value.default
-        input_fields[name] = (param_type, Field(default=default_value))
-    input_model = create_model(f"{class_name}Request", **input_fields)
+    class_name, input_model = create_request_model(descriptor, original_handler)
 
     # Check if the original handler is an async function
     # Fixme Unify handler after replacing status checking model with file based mode.
@@ -130,7 +116,7 @@ def wrap_handler(
     else:
 
         def handler(input: input_model):
-            def timed_handler(intput: input_model):
+            def timed_handler(input):
                 result = None
                 try:
                     dict_input = input.model_dump()
@@ -171,6 +157,27 @@ def wrap_handler(
         f"Handler of {original_handler.__name__} annotated with {handler.__annotations__}"
     )
     return handler
+
+
+# TODO: Maybe the return is not correct: class_name,input_model
+# It is only used to create the input model
+# class_name must be resolved outside of this function
+def create_request_model(descriptor, original_handler):
+    sig = signature(original_handler)
+    type_hints = get_type_hints(original_handler)
+
+    _, class_name = descriptor.split(":")
+
+    input_fields = {}
+    for name, param in sig.parameters.items():
+        param_type = type_hints.get(name, Any)
+        default_value = param.default if param.default != Parameter.empty else ...
+        if not isinstance(default_value, type(...)):  # Comprueba si no es Ellipsis
+            if isinstance(default_value, Field):
+                default_value = default_value.default
+        input_fields[name] = (param_type, Field(default=default_value))
+    input_model = create_model(f"{class_name}Request", **input_fields)
+    return class_name, input_model
 
 
 def model_download(model_path: str) -> str:
