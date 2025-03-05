@@ -373,7 +373,7 @@ wheels = [
 
 [[package]]
 name = "cogito"
-version = "0.2.6a0"
+version = "0.2.6a1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
