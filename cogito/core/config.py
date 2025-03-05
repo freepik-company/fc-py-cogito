@@ -74,7 +74,7 @@ class CogitoConfig(BaseModel):
     """
 
     server: ServerConfig
-    trainer: str
+    trainer: str = ""
 
     @classmethod
     def default(cls):

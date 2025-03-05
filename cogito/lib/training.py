@@ -21,6 +21,9 @@ def training(config_path, payload_data):
             "No configuration file found. Please initialize the project first."
         )
 
+    if config.cogito.trainer == "":
+        raise ValueError("No trainer specified in the configuration file.")
+
     # Load training instance using the path to the cogito.yaml file
     trainer = instance_class(config.cogito.trainer)
 

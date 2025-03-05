@@ -1,5 +1,5 @@
 cogito:
-  trainer: train:Trainer
+  #trainer: train:Trainer
 
   server:
     readiness_file: /tmp/cogito-readiness.lock
