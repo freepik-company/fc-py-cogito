@@ -68,29 +68,17 @@ class ServerConfig(BaseModel):
         )
 
 
-class TrainingConfig(BaseModel):
-    """
-    Training configuration.
-    """
-
-    pass
-
-    @classmethod
-    def default(cls):
-        return cls()
-
-
 class CogitoConfig(BaseModel):
     """
     Cogito configuration.
     """
 
     server: ServerConfig
-    training: TrainingConfig
+    trainer: str
 
     @classmethod
     def default(cls):
-        return cls(server=ServerConfig.default(), training=TrainingConfig.default())
+        return cls(server=ServerConfig.default(), trainer="train:Trainer")
 
 
 class ConfigFile(BaseModel):

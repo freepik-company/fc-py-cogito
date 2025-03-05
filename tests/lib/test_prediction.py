@@ -27,7 +27,7 @@ def test_payload():
 
 
 @patch("cogito.lib.prediction.ConfigFile")
-@patch("cogito.lib.prediction.load_predictor")
+@patch("cogito.lib.prediction.instance_class")
 @patch("cogito.lib.prediction.create_request_model")
 @patch("cogito.lib.prediction.get_predictor_handler_return_type")
 @patch("cogito.lib.prediction.wrap_handler")
@@ -37,7 +37,7 @@ def test_prediction_successful(
     mock_wrap_handler,
     mock_get_return_type,
     mock_create_request,
-    mock_load_predictor,
+    mock_instance_class,
     mock_config_file_class,
     mock_config_file,
     test_payload,
@@ -46,7 +46,7 @@ def test_prediction_successful(
     mock_config_file_class.load_from_file.return_value = mock_config_file
 
     predictor_instance = MockPredictor()
-    mock_load_predictor.return_value = predictor_instance
+    mock_instance_class.return_value = predictor_instance
 
     input_model_class = MagicMock()
     input_model = MagicMock()
@@ -67,7 +67,7 @@ def test_prediction_successful(
 
     # Assertions
     mock_config_file_class.load_from_file.assert_called_once_with(config_path)
-    mock_load_predictor.assert_called_once_with("test_predictor")
+    mock_instance_class.assert_called_once_with("test_predictor")
     mock_asyncio_run.assert_called_once()
     mock_create_request.assert_called_once()
     mock_get_return_type.assert_called_once_with(predictor_instance)
@@ -91,15 +91,15 @@ def test_prediction_config_not_found(mock_config_file_class, test_payload):
 
 
 @patch("cogito.lib.prediction.ConfigFile")
-@patch("cogito.lib.prediction.load_predictor")
+@patch("cogito.lib.prediction.instance_class")
 def test_prediction_general_exception(
-    mock_load_predictor, mock_config_file_class, mock_config_file, test_payload
+    mock_instance_class, mock_config_file_class, mock_config_file, test_payload
 ):
     # Setup mocks
     mock_config_file_class.load_from_file.return_value = mock_config_file
 
     # Set up the predictor mock to raise an exception without creating a coroutine
-    mock_load_predictor.side_effect = Exception("Test exception")
+    mock_instance_class.side_effect = Exception("Test exception")
 
     # Patch asyncio.run separately to ensure it's not used in this test path
     with patch("cogito.lib.prediction.asyncio.run"):

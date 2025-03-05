@@ -8,12 +8,15 @@ from cogito.core.exceptions import ConfigFileNotFoundError
 from cogito.core.utils import (
     create_request_model,
     get_predictor_handler_return_type,
-    load_predictor,
+    instance_class,
     wrap_handler,
 )
 
 
 def prediction(config_path, payload_data) -> dict:
+    """
+    Predict a model using the payload data
+    """
 
     app_dir = os.path.dirname(os.path.abspath(config_path))
 
@@ -27,7 +30,7 @@ def prediction(config_path, payload_data) -> dict:
     # Load predictor instance using the path to the cogito.yaml file
     sys.path.insert(0, app_dir)
     predictor = config.cogito.server.route.predictor
-    predictor_instance = load_predictor(predictor)
+    predictor_instance = instance_class(predictor)
 
     # Run setup method asynchronously
     asyncio.run(predictor_instance.setup())

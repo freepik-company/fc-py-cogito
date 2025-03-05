@@ -7,7 +7,6 @@ from cogito.core.config import (
     FastAPIConfig,
     RouteConfig,
     ServerConfig,
-    TrainingConfig,
 )
 
 
@@ -89,13 +88,11 @@ def _init_prompted() -> ConfigFile:
 
     # todo add training settings, when defined
 
-    training = TrainingConfig()
-
     click.echo("Great! We're all set.")
 
     cogito = CogitoConfig(
         server=server,
-        training=training,
+        trainer="train:Trainer",
     )
 
     return ConfigFile(cogito=cogito)

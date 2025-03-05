@@ -29,7 +29,7 @@ from cogito.core.models import BasePredictor
 from cogito.core.utils import (
     create_routes_semaphores,
     get_predictor_handler_return_type,
-    load_predictor,
+    instance_class,
     wrap_handler,
     readiness_context,
 )
@@ -103,7 +103,7 @@ class Application:
         self._logger.info("Adding route", extra={"route": route})
         map_route_to_model[route.path] = route.predictor
         if route.predictor not in self.map_model_to_instance:
-            predictor = load_predictor(route.predictor)
+            predictor = instance_class(route.predictor)
             self.map_model_to_instance[route.predictor] = predictor
         else:
             self._logger.info(
