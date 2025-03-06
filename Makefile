@@ -61,6 +61,9 @@ code-style: code-style-dirty ## Check the code style and commit the changes
 pre-commit-install: ## Install pre-commit hooks
 	@pre-commit install
 
+pre-commit-run: pre-commit-install ## Run the pre-commit hooks
+	@$(ACTIVATE) && pre-commit run --all-files
+
 ##@ Dependencies management commands
 
 dependencies-compile: ## Compile the dependencies

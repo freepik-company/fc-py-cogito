@@ -1,4 +1,6 @@
 cogito:
+  #trainer: train:Trainer
+
   server:
     readiness_file: /tmp/cogito-readiness.lock
     cache_dir: /tmp/cogito
@@ -18,4 +20,3 @@ cogito:
       tags:
         - predict
     version: 0.1.0
-  training: { }

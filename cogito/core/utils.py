@@ -25,22 +25,23 @@ from cogito.core.model_store import download_gcp_model, download_huggingface_mod
 from cogito.core.models import BasePredictor
 
 
-def load_predictor(class_path) -> Any:
-    predictor_path, predictor_class = class_path.split(":")
-    module = importlib.import_module(f"{predictor_path}")
+def instance_class(class_path) -> Any:
+    """
+    Instance a class from a string path
+    """
+    path, class_name = class_path.split(":")
+    module = importlib.import_module(f"{path}")
 
-    if not hasattr(module, predictor_class):
-        raise AttributeError(
-            f"Class {predictor_class} not found in module {predictor_path}"
-        )
+    if not hasattr(module, class_name):
+        raise AttributeError(f"Class {class_name} not found in module {path}")
 
-    predict_class = getattr(module, predictor_class)
+    object_class = getattr(module, class_name)
 
     # Build an instance of the class
-    predict_instance = predict_class()
+    instance = object_class()
 
     # Instantiate and return the class
-    return predict_instance
+    return instance
 
 
 def get_predictor_handler_return_type(predictor: BasePredictor):
