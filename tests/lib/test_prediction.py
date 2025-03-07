@@ -6,7 +6,7 @@ from cogito.core.exceptions import ConfigFileNotFoundError
 
 
 class MockPredictor:
-    def setup(self):
+    async def setup(self):
         # Mock implementation for setup
         pass
 
@@ -17,7 +17,7 @@ class MockPredictor:
 @pytest.fixture
 def mock_config_file():
     config_mock = MagicMock()
-    config_mock.cogito.server.route.predictor = "test_predictor"
+    config_mock.cogito.get_predictor = "test_predictor"
     return config_mock
 
 

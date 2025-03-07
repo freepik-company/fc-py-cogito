@@ -29,7 +29,7 @@ class TestTraining(unittest.TestCase):
     ):
         # Setup
         mock_config = MagicMock()
-        mock_config.cogito.trainer = "path.to.MockTrainer"
+        mock_config.cogito.get_trainer = "path.to.MockTrainer"
         mock_load_config.return_value = mock_config
 
         mock_trainer = MockTrainer()
@@ -85,7 +85,7 @@ class TestTraining(unittest.TestCase):
     ):
         # Setup
         mock_config = MagicMock()
-        mock_config.cogito.trainer = "path.to.MockTrainer"
+        mock_config.cogito.get_trainer = "path.to.MockTrainer"
         mock_load_config.return_value = mock_config
 
         mock_trainer = MockTrainer()
