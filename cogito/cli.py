@@ -31,6 +31,7 @@ cli.add_command(scaffold)
 cli.add_command(run)
 cli.add_command(predict)
 cli.add_command(train)
+cli.add_command(train)
 cli.add_command(version)
 cli.add_command(config)
 

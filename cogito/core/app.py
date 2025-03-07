@@ -16,10 +16,12 @@ from cogito.api.handlers import (
 from cogito.api.responses import ErrorResponse
 from cogito.core.config.file import ConfigFile
 from cogito.core.exceptioin_handlers import (
+    bad_request_exception_handler,
     too_many_requests_exception_handler,
     validation_exception_handler,
 )
 from cogito.core.exceptions import (
+    BadRequestError,
     ConfigFileNotFoundError,
     NoThreadsAvailableError,
     SetupError,
@@ -29,6 +31,7 @@ from cogito.core.models import BasePredictor
 from cogito.core.utils import (
     create_routes_semaphores,
     get_predictor_handler_return_type,
+    instance_class,
     instance_class,
     wrap_handler,
     readiness_context,
@@ -104,6 +107,7 @@ class Application:
         map_route_to_model[route.path] = route.predictor
         if route.predictor not in self.map_model_to_instance:
             predictor = instance_class(route.predictor)
+            predictor = instance_class(route.predictor)
             self.map_model_to_instance[route.predictor] = predictor
         else:
             self._logger.info(
@@ -131,9 +135,13 @@ class Application:
             description=route.description,
             tags=route.tags,
             response_model=response_model,
-            responses={500: {"model": ErrorResponse}},
+            responses={
+                500: {"model": ErrorResponse},
+                400: {"model": BadRequestResponse},
+            },
         )
 
+        self.app.add_exception_handler(BadRequestError, bad_request_exception_handler)
         self.app.add_exception_handler(
             RequestValidationError, validation_exception_handler
         )
