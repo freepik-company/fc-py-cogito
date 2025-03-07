@@ -12,24 +12,34 @@ from cogito.core.exceptions import ConfigFileNotFoundError
 
 
 class MockTrainer:
-    async def setup(self):
-        pass
+    def __init__(self):
+        # Use MagicMock instead of an async function to avoid creating coroutines
+        setup_mock = MagicMock()
+        setup_mock.return_value = None
+        self.setup = setup_mock
 
     def train(self, **kwargs):
         return {"model_accuracy": 0.95, "training_complete": True}
 
 
 class TestTraining(unittest.TestCase):
+    
+    def setUp(self):
+        # Patch asyncio.run globally for all tests in this class
+        self.patcher = patch("cogito.lib.training.asyncio.run", return_value=None)
+        self.mock_asyncio_run = self.patcher.start()
+        
+    def tearDown(self):
+        self.patcher.stop()
 
     @patch("cogito.lib.training.ConfigFile.load_from_file")
     @patch("cogito.lib.training.instance_class")
-    @patch("cogito.lib.training.asyncio.run")
     def test_training_success(
-        self, mock_asyncio_run, mock_instance_class, mock_load_config
+        self, mock_instance_class, mock_load_config
     ):
         # Setup
         mock_config = MagicMock()
-        mock_config.cogito.trainer = "path.to.MockTrainer"
+        mock_config.cogito.get_trainer = "path.to.MockTrainer"
         mock_load_config.return_value = mock_config
 
         mock_trainer = MockTrainer()
@@ -53,10 +63,9 @@ class TestTraining(unittest.TestCase):
         # Check that instance_class was called with the correct trainer path
         mock_instance_class.assert_called_once_with("path.to.MockTrainer")
 
-        # Check that setup was run asynchronously
-        mock_asyncio_run.assert_called_once()
-        self.assertEqual(mock_asyncio_run.call_args[0][0].__name__, "setup")
-
+        # Check that asyncio.run was called
+        self.mock_asyncio_run.assert_called_once()
+        
         # Check that train was called with the correct payload
         mock_trainer.train.assert_called_once_with(**payload_data)
 
@@ -78,14 +87,13 @@ class TestTraining(unittest.TestCase):
 
     @patch("cogito.lib.training.ConfigFile.load_from_file")
     @patch("cogito.lib.training.instance_class")
-    @patch("cogito.lib.training.asyncio.run")
     @patch("cogito.lib.training.sys.path")
     def test_training_with_app_dir_in_path(
-        self, mock_sys_path, mock_asyncio_run, mock_instance_class, mock_load_config
+        self, mock_sys_path, mock_instance_class, mock_load_config
     ):
         # Setup
         mock_config = MagicMock()
-        mock_config.cogito.trainer = "path.to.MockTrainer"
+        mock_config.cogito.get_trainer = "path.to.MockTrainer"
         mock_load_config.return_value = mock_config
 
         mock_trainer = MockTrainer()

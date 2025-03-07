@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 
-from cogito.core.config import ConfigFile
+from cogito.core.config.file import ConfigFile
 from cogito.core.exceptions import ConfigFileNotFoundError
 from cogito.core.utils import instance_class
 
@@ -21,11 +21,11 @@ def training(config_path, payload_data):
             "No configuration file found. Please initialize the project first."
         )
 
-    if config.cogito.trainer == "":
+    if config.cogito.get_trainer == "":
         raise ValueError("No trainer specified in the configuration file.")
 
     # Load training instance using the path to the cogito.yaml file
-    trainer = instance_class(config.cogito.trainer)
+    trainer = instance_class(config.cogito.get_trainer)
 
     # Run setup method asynchronously
     asyncio.run(trainer.setup())

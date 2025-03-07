@@ -3,7 +3,7 @@ import os
 import click
 from jinja2 import Environment, FileSystemLoader
 
-from cogito.core.config import ConfigFile
+from cogito.core.config.file import ConfigFile
 from cogito.core.exceptions import ConfigFileNotFoundError
 
 
@@ -16,10 +16,11 @@ def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
 
     # Group routes by file
     files = {}
-    route = config.cogito.server.route
+    predictor = config.cogito.predictor
+    route = config.cogito.route
 
-    file_name = f'{route.predictor.split(":")[0]}.py'
-    class_name = route.predictor.split(":")[1]
+    file_name = f'{predictor.split(":")[0]}.py'
+    class_name = predictor.split(":")[1]
     class_data = route
 
     if file_name not in files:

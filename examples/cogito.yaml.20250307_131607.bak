@@ -1,22 +1,23 @@
+config_version: 0
 cogito:
-  predictor: predict:Predictor
+  trainer: train:Trainer
+
   server:
+    readiness_file: /tmp/cogito-readiness.lock
     cache_dir: /tmp/cogito
     description: Inference server
+    threads: 4
     fastapi:
       access_log: true
       debug: false
       host: 127.0.0.1
       port: 8000
     name: Cogito ergo sum
-    readiness_file: /tmp/cogito-readiness.lock
     route:
       description: Make a single prediction
       name: Predict
       path: /v1/predict
+      predictor: predict:Predictor
       tags:
-      - predict
-    threads: 4
+        - predict
     version: 0.1.0
-  trainer: train:Trainer
-config_version: 1

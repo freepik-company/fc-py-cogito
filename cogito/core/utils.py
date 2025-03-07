@@ -18,7 +18,7 @@ except ImportError:
 from pydantic import create_model
 
 from cogito.api.responses import ErrorResponse, ResultResponse
-from cogito.core.config import CogitoConfig
+from cogito.core.config.file import ConfigFile
 from cogito.core.exceptions import (
     ModelDownloadError,
     NoThreadsAvailableError,
@@ -35,16 +35,27 @@ def instance_class(class_path) -> Any:
     """
     path, class_name = class_path.split(":")
     module = importlib.import_module(f"{path}")
+def instance_class(class_path) -> Any:
+    """
+    Instance a class from a string path
+    """
+    path, class_name = class_path.split(":")
+    module = importlib.import_module(f"{path}")
 
+    if not hasattr(module, class_name):
+        raise AttributeError(f"Class {class_name} not found in module {path}")
     if not hasattr(module, class_name):
         raise AttributeError(f"Class {class_name} not found in module {path}")
 
     object_class = getattr(module, class_name)
+    object_class = getattr(module, class_name)
 
     # Build an instance of the class
     instance = object_class()
+    instance = object_class()
 
     # Instantiate and return the class
+    return instance
     return instance
 
 
@@ -207,10 +218,9 @@ def model_download(model_path: str) -> str:
         raise ModelDownloadError(model_path, e)
 
 
-def create_routes_semaphores(config: CogitoConfig) -> Dict[str, asyncio.Semaphore]:
+def create_routes_semaphores(config: ConfigFile) -> Dict[str, asyncio.Semaphore]:
     semaphores = {}
-    route = config.server.route
-    semaphores[route.predictor] = asyncio.Semaphore(config.server.threads)
+    semaphores[config.cogito.get_predictor] = asyncio.Semaphore(config.cogito.get_server_threads)
 
     return semaphores
 

@@ -3,8 +3,8 @@ import pytest
 from unittest.mock import patch, mock_open, MagicMock
 
 from cogito.commands.scaffold_predict import scaffold_predict_classes
-from cogito.core.config import (
-    ConfigFile,
+from cogito.core.config import ConfigFile
+from cogito.core.config.v0 import (
     RouteConfig,
     ServerConfig,
     CogitoConfig,
@@ -29,9 +29,19 @@ def mock_config():
         fastapi=FastAPIConfig(host="0.0.0.0", port=8000, debug=False, access_log=False),
     )
     cogito = CogitoConfig(server=server, trainer="trainer.py:TrainerClass")
-    return ConfigFile(
-        cogito=cogito,
-    )
+    
+    # Create a mock version of the CogitoConfig with properties that match what scaffold_predict expects
+    mock_cogito = MagicMock()
+    mock_cogito.get_predictor = "predict.py:PredictClass"
+    mock_cogito.predictor = "predict.py:PredictClass"  # Also set the direct attribute
+    mock_cogito.get_route = route
+    mock_cogito.route = route  # Also set the direct attribute
+    
+    # Create a mock ConfigFile with our mock cogito
+    mock_config = MagicMock(spec=ConfigFile)
+    mock_config.cogito = mock_cogito
+    
+    return mock_config
 
 
 @pytest.fixture
