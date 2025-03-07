@@ -15,3 +15,10 @@ class ErrorResponse(BaseModel):
 
     def to_json_response(self) -> JSONResponse:
         return JSONResponse(status_code=500, content=self.model_dump())
+
+
+class BadRequestResponse(BaseModel):
+    message: str
+
+    def to_json_response(self) -> JSONResponse:
+        return JSONResponse(status_code=400, content=self.model_dump())

@@ -13,13 +13,18 @@ from cogito.api.handlers import (
     health_check_handler,
     metrics_handler,
 )
-from cogito.api.responses import ErrorResponse
+from cogito.api.responses import (
+    ErrorResponse,
+    BadRequestResponse,
+)
 from cogito.core.config import ConfigFile
 from cogito.core.exceptioin_handlers import (
+    bad_request_exception_handler,
     too_many_requests_exception_handler,
     validation_exception_handler,
 )
 from cogito.core.exceptions import (
+    BadRequestError,
     ConfigFileNotFoundError,
     NoThreadsAvailableError,
     SetupError,
@@ -131,9 +136,13 @@ class Application:
             description=route.description,
             tags=route.tags,
             response_model=response_model,
-            responses={500: {"model": ErrorResponse}},
+            responses={
+                500: {"model": ErrorResponse},
+                400: {"model": BadRequestResponse},
+            },
         )
 
+        self.app.add_exception_handler(BadRequestError, bad_request_exception_handler)
         self.app.add_exception_handler(
             RequestValidationError, validation_exception_handler
         )
