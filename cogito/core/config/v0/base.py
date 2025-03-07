@@ -39,6 +39,11 @@ class ConfigInterface(ABC):
         pass
 
     @abstractmethod
+    def get_route_path(self) -> str:
+        """Get the route path."""
+        pass
+
+    @abstractmethod
     def get_server_threads(self) -> int:
         """Get the server threads."""
         pass
@@ -147,6 +152,22 @@ class CogitoConfig(BaseModel, ConfigInterface):
     def get_route(self) -> str:
         return self.server.route
 
+    @property
+    def get_route_path(self) -> str:
+        return self.server.route.path
+
+    @property
+    def get_route_name(self) -> str:
+        return self.server.route.name
+
+    @property
+    def get_route_description(self) -> str:
+        return self.server.route.description
+
+    @property
+    def get_route_tags(self) -> list[str]:
+        return self.server.route.tags
+    
     @property
     def get_server_threads(self) -> int:
         return self.server.threads

@@ -50,7 +50,7 @@ class ConfigFile(BaseModel):
     def default(cls):
         config_class = cls._get_config_class(DEFAULT_CONFIG_VERSION)
         cogito_config = config_class.default()
-        return cls(cogito=cogito_config)
+        return cls(cogito=cogito_config, config_version=DEFAULT_CONFIG_VERSION)
 
     @classmethod
     def exists(cls, file_path: str) -> bool:

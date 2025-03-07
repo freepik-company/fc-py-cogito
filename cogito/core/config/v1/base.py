@@ -22,6 +22,10 @@ class CogitoConfig(v0):
             predictor="predict:Predictor",
         )
 
+    @property
+    def get_predictor(self):
+        return self.predictor
+
     def upgrade(self, version: int, config: v0):
         """Upgrade the configuration to a newer version."""
 
