@@ -19,7 +19,11 @@ from pydantic import create_model
 
 from cogito.api.responses import ErrorResponse, ResultResponse
 from cogito.core.config import CogitoConfig
-from cogito.core.exceptions import ModelDownloadError, NoThreadsAvailableError
+from cogito.core.exceptions import (
+    ModelDownloadError,
+    NoThreadsAvailableError,
+    BadRequestError,
+)
 from cogito.core.metrics import inference_duration_histogram
 from cogito.core.model_store import download_gcp_model, download_huggingface_model
 from cogito.core.models import BasePredictor
@@ -92,6 +96,8 @@ def wrap_handler(
                         end_time * 1000, {"predictor": class_name, "async": True}
                     )
                     # todo Count successful requests
+                except BadRequestError as e:
+                    raise
                 except Exception as e:
                     logging.exception(e)
                     # todo Count failed requests
@@ -131,6 +137,8 @@ def wrap_handler(
                         end_time * 1000, {"predictor": class_name, "async": False}
                     )
                     # todo Count successful requests
+                except BadRequestError as e:
+                    raise
                 except Exception as e:
                     logging.exception(e)
                     # todo Count failed requests
