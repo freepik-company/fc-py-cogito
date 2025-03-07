@@ -6,6 +6,7 @@ from cogito.commands.run import run
 from cogito.commands.predict import predict
 from cogito.commands.version import version
 from cogito.commands.train import train
+from cogito.commands.config import config
 
 
 @click.group()
@@ -31,6 +32,7 @@ cli.add_command(run)
 cli.add_command(predict)
 cli.add_command(train)
 cli.add_command(version)
+cli.add_command(config)
 
 
 def main():
