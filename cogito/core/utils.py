@@ -18,7 +18,7 @@ except ImportError:
 from pydantic import create_model
 
 from cogito.api.responses import ErrorResponse, ResultResponse
-from cogito.core.config import CogitoConfig
+from cogito.core.config.file import ConfigFile
 from cogito.core.exceptions import ModelDownloadError, NoThreadsAvailableError
 from cogito.core.metrics import inference_duration_histogram
 from cogito.core.model_store import download_gcp_model, download_huggingface_model
@@ -199,10 +199,10 @@ def model_download(model_path: str) -> str:
         raise ModelDownloadError(model_path, e)
 
 
-def create_routes_semaphores(config: CogitoConfig) -> Dict[str, asyncio.Semaphore]:
+def create_routes_semaphores(config: ConfigFile) -> Dict[str, asyncio.Semaphore]:
     semaphores = {}
-    route = config.server.route
-    semaphores[route.predictor] = asyncio.Semaphore(config.server.threads)
+    route = config.cogito.get_route
+    semaphores[route.predictor] = asyncio.Semaphore(config.cogito.get_server_threads)
 
     return semaphores
 

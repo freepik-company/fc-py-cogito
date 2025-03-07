@@ -3,7 +3,7 @@ import json
 import os
 import sys
 
-from cogito.core.config import ConfigFile
+from cogito.core.config.file import ConfigFile
 from cogito.core.exceptions import ConfigFileNotFoundError
 from cogito.core.utils import (
     create_request_model,
@@ -19,6 +19,7 @@ def prediction(config_path, payload_data) -> dict:
     """
 
     app_dir = os.path.dirname(os.path.abspath(config_path))
+    sys.path.insert(0, app_dir)
 
     try:
         config = ConfigFile.load_from_file(f"{config_path}")
@@ -28,8 +29,10 @@ def prediction(config_path, payload_data) -> dict:
         )
 
     # Load predictor instance using the path to the cogito.yaml file
-    sys.path.insert(0, app_dir)
-    predictor = config.cogito.server.route.predictor
+    if config.cogito.get_predictor == "":
+        raise ValueError("No predictor specified in the configuration file.")
+
+    predictor = config.cogito.get_predictor
     predictor_instance = instance_class(predictor)
 
     # Run setup method asynchronously

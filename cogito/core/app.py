@@ -14,7 +14,7 @@ from cogito.api.handlers import (
     metrics_handler,
 )
 from cogito.api.responses import ErrorResponse
-from cogito.core.config import ConfigFile
+from cogito.core.config.file import ConfigFile
 from cogito.core.exceptioin_handlers import (
     too_many_requests_exception_handler,
     validation_exception_handler,
@@ -56,9 +56,9 @@ class Application:
             )
             self.config = ConfigFile.default()
 
-        if self.config.cogito.server.cache_dir:
-            os.environ["HF_HOME"] = self.config.cogito.server.cache_dir
-            os.environ["COGITO_HOME"] = self.config.cogito.server.cache_dir
+        if self.config.cogito.get_server_cache_dir:
+            os.environ["HF_HOME"] = self.config.cogito.get_server_cache_dir
+            os.environ["COGITO_HOME"] = self.config.cogito.get_server_cache_dir
         else:
             os.environ["HF_HOME"] = os.path.expanduser("/.cogito/models")
             os.environ["COGITO_HOME"] = os.path.expanduser("/.cogito/models")
@@ -75,15 +75,15 @@ class Application:
                 )
                 sys.exit(1)
 
-            with readiness_context(self.config.cogito.server.readiness_file):
+            with readiness_context(self.config.cogito.get_server_readiness_file):
                 yield
 
         self.app = FastAPI(
-            title=self.config.cogito.server.name,
-            version=self.config.cogito.server.version,
-            description=self.config.cogito.server.description,
-            access_log=self.config.cogito.server.fastapi.access_log,
-            debug=self.config.cogito.server.fastapi.debug,
+            title=self.config.cogito.get_server_name,
+            version=self.config.cogito.get_server_version,
+            description=self.config.cogito.get_server_description,
+            access_log=self.config.cogito.get_fastapi_access_log,
+            debug=self.config.cogito.get_fastapi_debug,
             lifespan=lifespan,
         )
 
@@ -96,9 +96,9 @@ class Application:
 
         map_route_to_model: Dict[str, str] = {}
         self.map_model_to_instance: Dict[str, BasePredictor] = {}
-        semaphores = create_routes_semaphores(self.config.cogito)
+        semaphores = create_routes_semaphores(self.config)
 
-        route = self.config.cogito.server.route
+        route = self.config.cogito.get_route
 
         self._logger.info("Adding route", extra={"route": route})
         map_route_to_model[route.path] = route.predictor
@@ -184,8 +184,8 @@ class Application:
     def run(self):
         uvicorn.run(
             self.app,
-            host=self.config.cogito.server.fastapi.host,
-            port=self.config.cogito.server.fastapi.port,
+            host=self.config.cogito.get_fastapi_host,
+            port=self.config.cogito.get_fastapi_port,
         )
 
     @classmethod
