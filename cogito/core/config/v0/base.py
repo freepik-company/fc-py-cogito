@@ -12,7 +12,7 @@ class ConfigInterface(ABC):
     """
     Interface for Cogito configuration classes.
     """
-    
+
     @abstractmethod
     def upgrade(self):
         """Upgrade the configuration to a newer version."""
@@ -37,7 +37,7 @@ class ConfigInterface(ABC):
     def get_route_config_class(self) -> Type[RouteConfig]:
         """Get the RouteConfig class."""
         pass
-        
+
     @abstractmethod
     def get_server_threads(self) -> int:
         """Get the server threads."""
@@ -86,7 +86,7 @@ class ConfigInterface(ABC):
     @abstractmethod
     def get_fastapi_host(self) -> str:
         """Get the fastapi host."""
-        pass    
+        pass
 
     @abstractmethod
     def get_fastapi_port(self) -> int:
@@ -98,12 +98,11 @@ class ConfigInterface(ABC):
         """Get the predictor."""
         pass
 
-
     def upgrade(self):
         """Upgrade the configuration to a newer version."""
         pass
-        
-    
+
+
 class CogitoConfig(BaseModel, ConfigInterface):
     """
     Cogito configuration.
@@ -125,73 +124,72 @@ class CogitoConfig(BaseModel, ConfigInterface):
     def get_server_config_class(cls) -> Type[ServerConfig]:
         """Get the ServerConfig class."""
         return ServerConfig
-    
+
     @classmethod
     def get_fastapi_config_class(cls) -> Type[FastAPIConfig]:
         """Get the FastAPIConfig class."""
         return FastAPIConfig
-    
+
     @classmethod
     def get_route_config_class(cls) -> Type[RouteConfig]:
         """Get the RouteConfig class."""
         return RouteConfig
-    
+
     @property
     def get_predictor(self) -> str:
         return self.server.route.predictor
-    
+
     @property
     def get_trainer(self) -> str:
         return self.trainer
-    
+
     @property
     def get_route(self) -> str:
         return self.server.route
-    
+
     @property
     def get_server_threads(self) -> int:
         return self.server.threads
-    
+
     @property
     def get_server_name(self) -> str:
         return self.server.name
-    
+
     @property
     def get_server_description(self) -> str:
         return self.server.description
-    
+
     @property
     def get_server_version(self) -> str:
         return self.server.version
-    
+
     @property
     def get_server_readiness_file(self) -> str:
         return self.server.readiness_file
-    
+
     @property
     def get_server_cache_dir(self) -> str:
         return self.server.cache_dir
-    
+
     @property
     def get_fastapi(self) -> FastAPIConfig:
         return self.server.fastapi
-    
+
     @property
     def get_fastapi_access_log(self) -> bool:
         return self.server.fastapi.access_log
-    
+
     @property
     def get_fastapi_debug(self) -> str:
         return self.server.fastapi.debug
-    
+
     @property
     def get_fastapi_host(self) -> str:
         return self.server.fastapi.host
-    
+
     @property
     def get_fastapi_port(self) -> int:
         return self.server.fastapi.port
-    
 
     def upgrade(self, version: int, config):
         """Upgrade the configuration to a newer version."""

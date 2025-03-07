@@ -16,8 +16,11 @@ class CogitoConfig(v0):
 
     @classmethod
     def default(cls):
-        return cls(server=ServerConfig.default(), trainer="train:Trainer", predictor="predict:Predictor")
-
+        return cls(
+            server=ServerConfig.default(),
+            trainer="train:Trainer",
+            predictor="predict:Predictor",
+        )
 
     def upgrade(self, version: int, config: v0):
         """Upgrade the configuration to a newer version."""
@@ -29,9 +32,9 @@ class CogitoConfig(v0):
             for field in previous_config.__dict__:
                 if field != "server.route.predictor":
                     setattr(self, field, getattr(previous_config, field))
-            
+
             # Set the predictor to the previous config
             self.predictor = previous_config.server.route.predictor
             self.server.route.predictor = None
-                        
+
         return self

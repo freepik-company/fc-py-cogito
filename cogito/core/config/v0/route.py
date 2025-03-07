@@ -17,8 +17,8 @@ class RouteConfig(BaseModel):
     def default(cls):
         return __class__(
             name="Predict",
-            description="Make a single prediction", 
+            description="Make a single prediction",
             path="/v1/predict",
             tags=["predict"],
-            predictor="predict:Predictor"
+            predictor="predict:Predictor",
         )

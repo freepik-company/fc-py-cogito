@@ -30,4 +30,3 @@ class ServerConfig(BaseModel):
             threads=1,
             readiness_file="$HOME/readiness.lock",
         )
-
