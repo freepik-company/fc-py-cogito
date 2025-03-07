@@ -4,9 +4,6 @@ from cogito.commands.scaffold_predict import scaffold_predict_classes
 from cogito.core.config.file import ConfigFile
 
 
-# TODO: usar cogito config según la version por defecto de file.py. Las clases de arriba no están bien por que no se encuentran ahí
-
-
 def _init_with_default() -> ConfigFile:
     return ConfigFile.default()
 
