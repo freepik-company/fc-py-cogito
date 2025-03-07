@@ -1,3 +1,9 @@
+## 0.2.6a2 (2025-03-07)
+
+### Feat
+
+- Implements BadRequestError raising and 400 error code response (#94)
+
 ## 0.2.6a1 (2025-02-27)
 
 ## 0.2.6a0 (2025-02-27)
