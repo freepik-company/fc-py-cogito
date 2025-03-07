@@ -15,7 +15,7 @@ def run(ctx):
     click.echo(f"Running '{absolute_path}' cogito application...")
     if not os.path.exists(absolute_path):
         click.echo(
-            f"Error: Path '{config_absolute_path}' does not exist.",
+            f"Error: Path '{absolute_path}' does not exist.",
             err=True,
             color=True,
         )
@@ -27,5 +27,7 @@ def run(ctx):
         app = Application(config_file_path=absolute_path)
         app.run()
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         click.echo(f"Error: {e}", err=True, color=True)
         exit(1)
