@@ -6,7 +6,7 @@ from cogito.core.config.file import ConfigFile
 
 @click.group()
 @click.pass_obj
-def config(ctx) -> None:
+def config(ctx: click.Context) -> None:
     """Configuration management commands."""
     pass
 
