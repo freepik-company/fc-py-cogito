@@ -59,7 +59,7 @@ code-style: code-style-dirty ## Check the code style and commit the changes
 	@git commit -am "style: fix code style"
 
 pre-commit-install: ## Install pre-commit hooks
-	@pre-commit install
+	@pre-commit install --hook-type pre-commit --hook-type pre-push
 
 pre-commit-run: pre-commit-install ## Run the pre-commit hooks
 	@$(ACTIVATE) && pre-commit run --all-files
