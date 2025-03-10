@@ -18,29 +18,47 @@ except ImportError:
 from pydantic import create_model
 
 from cogito.api.responses import ErrorResponse, ResultResponse
-from cogito.core.config import CogitoConfig
-from cogito.core.exceptions import ModelDownloadError, NoThreadsAvailableError
+from cogito.core.config.file import ConfigFile
+from cogito.core.exceptions import (
+    ModelDownloadError,
+    NoThreadsAvailableError,
+    BadRequestError,
+)
 from cogito.core.metrics import inference_duration_histogram
 from cogito.core.model_store import download_gcp_model, download_huggingface_model
 from cogito.core.models import BasePredictor
 
 
-def load_predictor(class_path) -> Any:
-    predictor_path, predictor_class = class_path.split(":")
-    module = importlib.import_module(f"{predictor_path}")
+def instance_class(class_path) -> Any:
+    """
+    Instance a class from a string path
+    """
+    path, class_name = class_path.split(":")
+    module = importlib.import_module(f"{path}")
 
-    if not hasattr(module, predictor_class):
-        raise AttributeError(
-            f"Class {predictor_class} not found in module {predictor_path}"
-        )
 
-    predict_class = getattr(module, predictor_class)
+def instance_class(class_path) -> Any:
+    """
+    Instance a class from a string path
+    """
+    path, class_name = class_path.split(":")
+    module = importlib.import_module(f"{path}")
+
+    if not hasattr(module, class_name):
+        raise AttributeError(f"Class {class_name} not found in module {path}")
+    if not hasattr(module, class_name):
+        raise AttributeError(f"Class {class_name} not found in module {path}")
+
+    object_class = getattr(module, class_name)
+    object_class = getattr(module, class_name)
 
     # Build an instance of the class
-    predict_instance = predict_class()
+    instance = object_class()
+    instance = object_class()
 
     # Instantiate and return the class
-    return predict_instance
+    return instance
+    return instance
 
 
 def get_predictor_handler_return_type(predictor: BasePredictor):
@@ -69,21 +87,7 @@ def wrap_handler(
     response_model: ResultResponse,
     semaphore: asyncio.Semaphore = None,
 ) -> Callable:
-    sig = signature(original_handler)
-    type_hints = get_type_hints(original_handler)
-
-    _, class_name = descriptor.split(":")
-
-    input_fields = {}
-    for name, param in sig.parameters.items():
-        param_type = type_hints.get(name, Any)
-        default_value = param.default if param.default != Parameter.empty else ...
-        print(f"default_value: {default_value}")
-        if not isinstance(default_value, type(...)):  # Comprueba si no es Ellipsis
-            if isinstance(default_value, Field):
-                default_value = default_value.default
-        input_fields[name] = (param_type, Field(default=default_value))
-    input_model = create_model(f"{class_name}Request", **input_fields)
+    class_name, input_model = create_request_model(descriptor, original_handler)
 
     # Check if the original handler is an async function
     # Fixme Unify handler after replacing status checking model with file based mode.
@@ -105,6 +109,8 @@ def wrap_handler(
                         end_time * 1000, {"predictor": class_name, "async": True}
                     )
                     # todo Count successful requests
+                except BadRequestError as e:
+                    raise
                 except Exception as e:
                     logging.exception(e)
                     # todo Count failed requests
@@ -130,7 +136,7 @@ def wrap_handler(
     else:
 
         def handler(input: input_model):
-            def timed_handler(intput: input_model):
+            def timed_handler(input):
                 result = None
                 try:
                     dict_input = input.model_dump()
@@ -144,6 +150,8 @@ def wrap_handler(
                         end_time * 1000, {"predictor": class_name, "async": False}
                     )
                     # todo Count successful requests
+                except BadRequestError as e:
+                    raise
                 except Exception as e:
                     logging.exception(e)
                     # todo Count failed requests
@@ -173,6 +181,27 @@ def wrap_handler(
     return handler
 
 
+# TODO: Maybe the return is not correct: class_name,input_model
+# It is only used to create the input model
+# class_name must be resolved outside of this function
+def create_request_model(descriptor, original_handler):
+    sig = signature(original_handler)
+    type_hints = get_type_hints(original_handler)
+
+    _, class_name = descriptor.split(":")
+
+    input_fields = {}
+    for name, param in sig.parameters.items():
+        param_type = type_hints.get(name, Any)
+        default_value = param.default if param.default != Parameter.empty else ...
+        if not isinstance(default_value, type(...)):  # Comprueba si no es Ellipsis
+            if isinstance(default_value, Field):
+                default_value = default_value.default
+        input_fields[name] = (param_type, Field(default=default_value))
+    input_model = create_model(f"{class_name}Request", **input_fields)
+    return class_name, input_model
+
+
 def model_download(model_path: str) -> str:
     """
     Download a model from various sources based on the model path format.
@@ -191,10 +220,11 @@ def model_download(model_path: str) -> str:
         raise ModelDownloadError(model_path, e)
 
 
-def create_routes_semaphores(config: CogitoConfig) -> Dict[str, asyncio.Semaphore]:
+def create_routes_semaphores(config: ConfigFile) -> Dict[str, asyncio.Semaphore]:
     semaphores = {}
-    route = config.server.route
-    semaphores[route.predictor] = asyncio.Semaphore(config.server.threads)
+    semaphores[config.cogito.get_predictor] = asyncio.Semaphore(
+        config.cogito.get_server_threads
+    )
 
     return semaphores
 

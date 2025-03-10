@@ -5,6 +5,8 @@ REPOSITORY?=testpypi
 
 BUMP_INCREMENT?="PATCH"
 
+VENV=.venv
+ACTIVATE=. $(VENV)/bin/activate
 
 all: help
 
@@ -48,38 +50,44 @@ git-prune: ## Prune the git repository
 	@rm .branches_to_delete
 
 code-style-check: ## Checks the code style.
-	@. .venv/bin/activate && black --check .
+	@$(ACTIVATE) && black --check .
 
 code-style-dirty: ## Fixes the code style but does not commit the changes
-	@. .venv/bin/activate && black .
+	@$(ACTIVATE) && black .
 
 code-style: code-style-dirty ## Check the code style and commit the changes
 	@git commit -am "style: fix code style"
 
 pre-commit-install: ## Install pre-commit hooks
-	@pre-commit install
+	@pre-commit install --hook-type pre-commit --hook-type pre-push
+
+pre-commit-tests: pre-commit-install ## Run the pre-commit hooks for tests
+	@$(ACTIVATE) && pre-commit run --all-files --hook-stage pre-push
+
+pre-commit-black: pre-commit-install ## Run the pre-commit hooks for black
+	@$(ACTIVATE) && pre-commit run --all-files --hook-stage pre-commit
 
 ##@ Dependencies management commands
 
 dependencies-compile: ## Compile the dependencies
-	@. .venv/bin/activate && uv pip compile --universal -o requirements.txt --no-deps --no-annotate --no-header pyproject.toml
+	@$(ACTIVATE) && uv pip compile --universal -o requirements.txt --no-deps --no-annotate --no-header pyproject.toml
 
 dependencies-install: ## Install the dependencies
-	@. .venv/bin/activate && uv sync
+	@$(ACTIVATE) && uv sync
 
 dependencies-dev-install: .venv ## Install the development dependencies
-	@. .venv/bin/activate && uv pip install -e .
-	@. .venv/bin/activate && uv sync --dev
+	@$(ACTIVATE) && uv pip install -e .
+	@$(ACTIVATE) && uv sync --dev
 
 ##@ Testing commands
 
 run-test: .venv dependencies-dev-install ## Run the tests
-	@. .venv/bin/activate && python -m pytest
+	@$(ACTIVATE) && python -m pytest
 
 ##@ Install
 
 install: ## Install the package
-	@pip install -e .
+	@$(ACTIVATE) && pip install -e .
 
 ##@ Release commands
 

@@ -8,23 +8,27 @@ from cogito import Application
 
 @click.command()
 @click.pass_obj
-def run(ctx):
+def run(ctx: click.Context) -> None:
     """Run cogito app"""
     config_path = ctx.get("config_path")
     absolute_path = os.path.abspath(config_path)
     click.echo(f"Running '{absolute_path}' cogito application...")
-    # change cwd to config_path
-    os.chdir(absolute_path)
     if not os.path.exists(absolute_path):
         click.echo(
-            f"Error: Path '{absolute_path}' does not exist.", err=True, color=True
+            f"Error: Path '{absolute_path}' does not exist.",
+            err=True,
+            color=True,
         )
         exit(1)
 
     try:
-        sys.path.insert(0, absolute_path)
+        app_dir = os.path.dirname(os.path.abspath(config_path))
+        sys.path.insert(0, app_dir)
         app = Application(config_file_path=absolute_path)
         app.run()
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         click.echo(f"Error: {e}", err=True, color=True)
         exit(1)

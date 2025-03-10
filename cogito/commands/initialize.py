@@ -1,14 +1,7 @@
 import click
 
 from cogito.commands.scaffold_predict import scaffold_predict_classes
-from cogito.core.config import (
-    CogitoConfig,
-    ConfigFile,
-    FastAPIConfig,
-    RouteConfig,
-    ServerConfig,
-    TrainingConfig,
-)
+from cogito.core.config.file import ConfigFile
 
 
 def _init_with_default() -> ConfigFile:
@@ -16,6 +9,16 @@ def _init_with_default() -> ConfigFile:
 
 
 def _init_prompted() -> ConfigFile:
+    latest_config_version_class = ConfigFile.get_latest_config_version_class()
+    # Import the module dynamically based on the string class path
+    module_path, class_name = latest_config_version_class.rsplit(".", 1)
+    config_module = __import__(module_path, fromlist=[class_name])
+    config_class = getattr(config_module, class_name)
+
+    # Create instances of the necessary configuration classes
+    # Instead of calling static methods, we should instantiate the classes directly
+    # or use the appropriate factory methods provided by the config class
+
     click.echo(
         "Please provide the following information to initialize the project configuration:"
     )
@@ -42,7 +45,9 @@ def _init_prompted() -> ConfigFile:
         "Would you like to enable access logs?", default=False, show_default=True
     )
 
-    fastapi = FastAPIConfig(
+    # Create FastAPI config using the appropriate constructor or factory method
+    fastapi_config_class = config_class.get_fastapi_config_class()
+    fastapi = fastapi_config_class(
         host=host,
         port=port,
         debug=debug,
@@ -52,13 +57,14 @@ def _init_prompted() -> ConfigFile:
     click.echo("This starts to look like an amazing inference service!")
 
     route = None
+    route_config_class = config_class.get_route_config_class()
 
     if click.confirm(
         "Would you like to add a default route to the API?",
         default=True,
         show_default=True,
     ):
-        route = RouteConfig.default()
+        route = route_config_class.default()
 
     cache_dir = click.prompt(
         "Cache directory for model weights and artifacts",
@@ -74,7 +80,9 @@ def _init_prompted() -> ConfigFile:
         show_default=True,
     )
 
-    server = ServerConfig(
+    # Create Server config
+    server_config_class = config_class.get_server_config_class()
+    server = server_config_class(
         name=name,
         description=description,
         version=version,
@@ -89,13 +97,14 @@ def _init_prompted() -> ConfigFile:
 
     # todo add training settings, when defined
 
-    training = TrainingConfig()
-
     click.echo("Great! We're all set.")
 
-    cogito = CogitoConfig(
+    # Create Cogito config
+    cogito_config_class = config_class.get_cogito_config_class()
+    cogito = cogito_config_class(
         server=server,
-        training=training,
+        trainer="train:Trainer",
+        predictor="predict:Predictor",
     )
 
     return ConfigFile(cogito=cogito)
@@ -125,13 +134,18 @@ def _init_prompted() -> ConfigFile:
 )
 @click.pass_context
 def init(
-    ctx, scaffold: bool = False, default: bool = False, force: bool = False
+    ctx: click.Context,
+    scaffold: bool = False,
+    default: bool = False,
+    force: bool = False,
 ) -> None:
     """Initialize the project configuration"""
-    config_path = ctx.obj.get("config_path", ".") if ctx.obj else "."
+    config_path = (
+        ctx.obj.get("config_path", "./cogito.yaml") if ctx.obj else "./cogito.yaml"
+    )
     click.echo("Initializing...")
 
-    if ConfigFile.exists(f"{config_path}/cogito.yaml") and not force:
+    if ConfigFile.exists(f"{config_path}") and not force:
         click.echo("Already initialized.")
         return
 
@@ -143,5 +157,7 @@ def init(
     if scaffold:
         scaffold_predict_classes(config, force)
 
-    config.save_to_file(f"{config_path}/cogito.yaml")
+    config.config_version = ConfigFile.latest_config_version()
+
+    config.save_to_file(f"{config_path}")
     click.echo("Initialized successfully.")

@@ -5,11 +5,13 @@ repos:
       - id: black
         files: \.py$  # This ensures black runs only on Python files
         exclude: ^\.venv/  # Excludes the virtual environment directory
+        stages: [pre-commit]
   - repo: local
     hooks:
       - id: pytest
         name: Run Pytest
-        entry: pytest
+        entry: .venv/bin/pytest
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-push]

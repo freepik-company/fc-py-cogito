@@ -13,13 +13,18 @@ from cogito.api.handlers import (
     health_check_handler,
     metrics_handler,
 )
-from cogito.api.responses import ErrorResponse
+from cogito.api.responses import (
+    ErrorResponse,
+    BadRequestResponse,
+)
 from cogito.core.config import ConfigFile
 from cogito.core.exceptioin_handlers import (
+    bad_request_exception_handler,
     too_many_requests_exception_handler,
     validation_exception_handler,
 )
 from cogito.core.exceptions import (
+    BadRequestError,
     ConfigFileNotFoundError,
     NoThreadsAvailableError,
     SetupError,
@@ -29,7 +34,7 @@ from cogito.core.models import BasePredictor
 from cogito.core.utils import (
     create_routes_semaphores,
     get_predictor_handler_return_type,
-    load_predictor,
+    instance_class,
     wrap_handler,
     readiness_context,
 )
@@ -41,16 +46,14 @@ class Application:
 
     def __init__(
         self,
-        config_file_path: str = ".",
+        config_file_path: str = "./cogito.yaml",
         logger: Union[Any, logging.Logger] = None,
     ):
 
         self._logger = logger or Application._get_default_logger()
 
         try:
-            self.config = ConfigFile.load_from_file(
-                os.path.join(f"{config_file_path}/cogito.yaml")
-            )
+            self.config = ConfigFile.load_from_file(os.path.join(f"{config_file_path}"))
         except ConfigFileNotFoundError as e:
             self._logger.warning(
                 "config file does not exist. Using default configuration.",
@@ -58,9 +61,9 @@ class Application:
             )
             self.config = ConfigFile.default()
 
-        if self.config.cogito.server.cache_dir:
-            os.environ["HF_HOME"] = self.config.cogito.server.cache_dir
-            os.environ["COGITO_HOME"] = self.config.cogito.server.cache_dir
+        if self.config.cogito.get_server_cache_dir:
+            os.environ["HF_HOME"] = self.config.cogito.get_server_cache_dir
+            os.environ["COGITO_HOME"] = self.config.cogito.get_server_cache_dir
         else:
             os.environ["HF_HOME"] = os.path.expanduser("/.cogito/models")
             os.environ["COGITO_HOME"] = os.path.expanduser("/.cogito/models")
@@ -77,15 +80,15 @@ class Application:
                 )
                 sys.exit(1)
 
-            with readiness_context(self.config.cogito.server.readiness_file):
+            with readiness_context(self.config.cogito.get_server_readiness_file):
                 yield
 
         self.app = FastAPI(
-            title=self.config.cogito.server.name,
-            version=self.config.cogito.server.version,
-            description=self.config.cogito.server.description,
-            access_log=self.config.cogito.server.fastapi.access_log,
-            debug=self.config.cogito.server.fastapi.debug,
+            title=self.config.cogito.get_server_name,
+            version=self.config.cogito.get_server_version,
+            description=self.config.cogito.get_server_description,
+            access_log=self.config.cogito.get_fastapi_access_log,
+            debug=self.config.cogito.get_fastapi_debug,
             lifespan=lifespan,
         )
 
@@ -98,44 +101,50 @@ class Application:
 
         map_route_to_model: Dict[str, str] = {}
         self.map_model_to_instance: Dict[str, BasePredictor] = {}
-        semaphores = create_routes_semaphores(self.config.cogito)
+        semaphores = create_routes_semaphores(self.config)
 
-        route = self.config.cogito.server.route
+        route = self.config.cogito.get_route
+        route_path = self.config.cogito.get_route_path
+        predictor_string = self.config.cogito.get_predictor
 
         self._logger.info("Adding route", extra={"route": route})
-        map_route_to_model[route.path] = route.predictor
-        if route.predictor not in self.map_model_to_instance:
-            predictor = load_predictor(route.predictor)
-            self.map_model_to_instance[route.predictor] = predictor
+        map_route_to_model[route_path] = predictor_string
+        if predictor_string not in self.map_model_to_instance:
+            predictor = instance_class(predictor_string)
+            self.map_model_to_instance[predictor_string] = predictor
         else:
             self._logger.info(
                 "Predictor class already loaded",
-                extra={"predictor": route.predictor},
+                extra={"predictor": predictor_string},
             )
 
-        model = self.map_model_to_instance.get(route.predictor)
+        model = self.map_model_to_instance.get(predictor_string)
         response_model = get_predictor_handler_return_type(model)
 
         handler = wrap_handler(
-            descriptor=route.predictor,
+            descriptor=predictor_string,
             original_handler=getattr(
-                self.map_model_to_instance.get(route.predictor), "predict"
+                self.map_model_to_instance.get(predictor_string), "predict"
             ),
-            semaphore=semaphores[route.predictor],
+            semaphore=semaphores[predictor_string],
             response_model=response_model,
         )
 
         self.app.add_api_route(
-            route.path,
+            route_path,
             handler,
             methods=["POST"],
-            name=route.name,
-            description=route.description,
-            tags=route.tags,
+            name=self.config.cogito.get_route_name,
+            description=self.config.cogito.get_route_description,
+            tags=self.config.cogito.get_route_tags,
             response_model=response_model,
-            responses={500: {"model": ErrorResponse}},
+            responses={
+                500: {"model": ErrorResponse},
+                400: {"model": BadRequestResponse},
+            },
         )
 
+        self.app.add_exception_handler(BadRequestError, bad_request_exception_handler)
         self.app.add_exception_handler(
             RequestValidationError, validation_exception_handler
         )
@@ -186,8 +195,8 @@ class Application:
     def run(self):
         uvicorn.run(
             self.app,
-            host=self.config.cogito.server.fastapi.host,
-            port=self.config.cogito.server.fastapi.port,
+            host=self.config.cogito.get_fastapi_host,
+            port=self.config.cogito.get_fastapi_port,
         )
 
     @classmethod

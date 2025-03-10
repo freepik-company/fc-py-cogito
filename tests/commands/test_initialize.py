@@ -1,10 +1,12 @@
 import os
 import pytest
+import tempfile
+from pathlib import Path
 from click.testing import CliRunner
 from unittest.mock import patch
 
 from cogito.commands.initialize import init
-from cogito.core.config import ConfigFile
+from cogito.core.config.file import ConfigFile
 
 
 @pytest.fixture
@@ -13,17 +15,16 @@ def runner():
 
 
 @pytest.fixture
-def clean_config():
-    # Remove config file if exists before each test
-    if os.path.exists("cogito.yaml"):
-        os.remove("cogito.yaml")
-    yield
-    # Cleanup after test
-    if os.path.exists("cogito.yaml"):
-        os.remove("cogito.yaml")
+def temp_dir():
+    # Create a temporary directory for config files
+    with tempfile.TemporaryDirectory() as temp_dir:
+        original_dir = os.getcwd()
+        os.chdir(temp_dir)
+        yield temp_dir
+        os.chdir(original_dir)
 
 
-def test_init_default(runner, clean_config):
+def test_init_default(runner, temp_dir):
     result = runner.invoke(init, ["--default"])
     assert result.exit_code == 0
     assert "Initializing..." in result.output
@@ -46,15 +47,15 @@ def test_init_default(runner, clean_config):
     assert config.cogito.server.fastapi.access_log is False
     assert config.cogito.server.fastapi.debug is False
 
-    # Route defaults (note: args and response are no longer present)
+    # Route defaults
     assert config.cogito.server.route.name == "Predict"
     assert config.cogito.server.route.description == "Make a single prediction"
     assert config.cogito.server.route.path == "/v1/predict"
-    assert config.cogito.server.route.predictor == "predict:Predictor"
+    assert config.cogito.predictor == "predict:Predictor"
     assert config.cogito.server.route.tags == ["predict"]
 
 
-def test_init_prompted(runner, clean_config):
+def test_init_prompted(runner, temp_dir):
     # Mock user input values
     inputs = [
         "Test Project",  # name
@@ -89,12 +90,12 @@ def test_init_prompted(runner, clean_config):
     assert config.cogito.server.route.name == "Predict"
     assert config.cogito.server.route.description == "Make a single prediction"
     assert config.cogito.server.route.path == "/v1/predict"
-    assert config.cogito.server.route.predictor == "predict:Predictor"
+    assert config.cogito.predictor == "predict:Predictor"
     assert config.cogito.server.route.tags == ["predict"]
     assert config.cogito.server.readiness_file == ".cogito-readiness.lock"
 
 
-def test_init_already_exists(runner, clean_config):
+def test_init_already_exists(runner, temp_dir):
     # Create initial config
     runner.invoke(init, ["--default"])
 
@@ -104,7 +105,7 @@ def test_init_already_exists(runner, clean_config):
     assert "Already initialized." in result.output
 
 
-def test_init_force(runner, clean_config):
+def test_init_force(runner, temp_dir):
     # Create initial config
     runner.invoke(init, ["--default"])
 
