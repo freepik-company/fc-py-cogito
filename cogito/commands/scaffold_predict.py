@@ -54,7 +54,7 @@ def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
     help="Force overwrite of existing files",
 )
 @click.pass_context
-def scaffold(ctx, force: bool = False) -> None:
+def scaffold(ctx: click.Context, force: bool = False) -> None:
     """Generate predict classes"""
 
     config_path = ctx.obj.get("config_path", ".") if ctx.obj else "."

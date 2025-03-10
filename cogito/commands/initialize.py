@@ -134,7 +134,10 @@ def _init_prompted() -> ConfigFile:
 )
 @click.pass_context
 def init(
-    ctx, scaffold: bool = False, default: bool = False, force: bool = False
+    ctx: click.Context,
+    scaffold: bool = False,
+    default: bool = False,
+    force: bool = False,
 ) -> None:
     """Initialize the project configuration"""
     config_path = (

@@ -8,7 +8,7 @@ from cogito import Application
 
 @click.command()
 @click.pass_obj
-def run(ctx):
+def run(ctx: click.Context) -> None:
     """Run cogito app"""
     config_path = ctx.get("config_path")
     absolute_path = os.path.abspath(config_path)
@@ -28,6 +28,7 @@ def run(ctx):
         app.run()
     except Exception as e:
         import traceback
+
         traceback.print_exc()
         click.echo(f"Error: {e}", err=True, color=True)
         exit(1)

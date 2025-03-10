@@ -9,7 +9,7 @@ from cogito.lib.training import training
 @click.command()
 @click.option("--payload", type=str, required=True, help="The payload for the training")
 @click.pass_obj
-def train(ctx, payload):
+def train(ctx: click.Context, payload: str) -> None:
     """
     Run a cogito training with the specified payload, printing the result to stdout.
 

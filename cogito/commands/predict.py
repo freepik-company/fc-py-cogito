@@ -11,7 +11,7 @@ from cogito.lib.prediction import prediction
     "--payload", type=str, required=True, help="The payload for the prediction"
 )
 @click.pass_obj
-def predict(ctx, payload):
+def predict(ctx: click.Context, payload: str) -> None:
     """
     Run a cogito prediction with the specified payload, printing the result to stdout.
 
