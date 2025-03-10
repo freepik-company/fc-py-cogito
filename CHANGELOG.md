@@ -1,3 +1,14 @@
+## 0.2.6a4 (2025-03-10)
+
+### Feat
+
+- **Makefile**: Enhance pre-commit hook targets
+- **Makefile**: Enhance pre-commit hook installation
+
+### Refactor
+
+- Clean up code formatting and remove redundant lines
+
 ## 0.2.6a3 (2025-03-07)
 
 ### Feat
