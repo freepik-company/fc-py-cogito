@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cogito"
-version = "0.2.6a4"
+version = "0.2.6"
 description = "Cogito is a Python module designed to streamline the creation and deployment of inference services. It provides tools and abstractions to wrap machine learning models and expose them as robust, production-ready APIs with minimal effort."
 authors = [
     {name = "freepik-company/tech-avengers", email = "aivengers@freepik.com"}
@@ -38,7 +38,6 @@ dev = [
     "black>=24.10.0",
     "build>=1.2.2.post1",
     "flake8>=7.1.1",
-    "jupyter>=1.1.1",
     "pre-commit>=4.1.0",
     "pytest>=8.3.4",
     "setuptools>=75.6.0",
