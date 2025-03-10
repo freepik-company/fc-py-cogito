@@ -29,18 +29,18 @@ def mock_config():
         fastapi=FastAPIConfig(host="0.0.0.0", port=8000, debug=False, access_log=False),
     )
     cogito = CogitoConfig(server=server, trainer="trainer.py:TrainerClass")
-    
+
     # Create a mock version of the CogitoConfig with properties that match what scaffold_predict expects
     mock_cogito = MagicMock()
     mock_cogito.get_predictor = "predict.py:PredictClass"
     mock_cogito.predictor = "predict.py:PredictClass"  # Also set the direct attribute
     mock_cogito.get_route = route
     mock_cogito.route = route  # Also set the direct attribute
-    
+
     # Create a mock ConfigFile with our mock cogito
     mock_config = MagicMock(spec=ConfigFile)
     mock_config.cogito = mock_cogito
-    
+
     return mock_config
 
 

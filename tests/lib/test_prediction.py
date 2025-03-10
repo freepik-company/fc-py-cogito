@@ -26,6 +26,7 @@ def mock_config_file():
 def test_payload():
     return {"text": "sample text for prediction"}
 
+
 # Patch asyncio.run globally for all tests in this module
 # This prevents warnings about unawaited coroutines
 @pytest.fixture(autouse=True)
@@ -100,23 +101,27 @@ def test_prediction_config_not_found(mock_config_file_class, test_payload):
 @patch("cogito.lib.prediction.ConfigFile")
 @patch("cogito.lib.prediction.instance_class")
 def test_prediction_general_exception(
-    mock_instance_class, mock_config_file_class, mock_config_file, test_payload, patch_asyncio
+    mock_instance_class,
+    mock_config_file_class,
+    mock_config_file,
+    test_payload,
+    patch_asyncio,
 ):
     # Setup mocks
     mock_config_file_class.load_from_file.return_value = mock_config_file
-    
+
     # Create a regular exception instead of a mock that creates a coroutine
     class TestException(Exception):
         pass
-    
-    # Raise the exception immediately when instance_class is called, 
+
+    # Raise the exception immediately when instance_class is called,
     # before any AsyncMock methods would be accessed
     mock_instance_class.side_effect = TestException("Test exception")
-    
+
     # Call the function and check for raised exception - exception should be raised
     # before asyncio.run is ever called
     with pytest.raises(TestException) as excinfo:
         prediction("/path/to/cogito.yaml", test_payload)
-    
+
     assert "Test exception" in str(excinfo.value)
     patch_asyncio.assert_not_called()  # Should never reach this point

@@ -114,4 +114,3 @@ class ConfigFile(BaseModel):
 
         with open(file_path, "w") as file:
             yaml.dump(self.model_dump(), file)
-

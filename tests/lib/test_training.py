@@ -23,20 +23,18 @@ class MockTrainer:
 
 
 class TestTraining(unittest.TestCase):
-    
+
     def setUp(self):
         # Patch asyncio.run globally for all tests in this class
         self.patcher = patch("cogito.lib.training.asyncio.run", return_value=None)
         self.mock_asyncio_run = self.patcher.start()
-        
+
     def tearDown(self):
         self.patcher.stop()
 
     @patch("cogito.lib.training.ConfigFile.load_from_file")
     @patch("cogito.lib.training.instance_class")
-    def test_training_success(
-        self, mock_instance_class, mock_load_config
-    ):
+    def test_training_success(self, mock_instance_class, mock_load_config):
         # Setup
         mock_config = MagicMock()
         mock_config.cogito.get_trainer = "path.to.MockTrainer"
@@ -65,7 +63,7 @@ class TestTraining(unittest.TestCase):
 
         # Check that asyncio.run was called
         self.mock_asyncio_run.assert_called_once()
-        
+
         # Check that train was called with the correct payload
         mock_trainer.train.assert_called_once_with(**payload_data)
 

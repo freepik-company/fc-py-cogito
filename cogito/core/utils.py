@@ -35,6 +35,8 @@ def instance_class(class_path) -> Any:
     """
     path, class_name = class_path.split(":")
     module = importlib.import_module(f"{path}")
+
+
 def instance_class(class_path) -> Any:
     """
     Instance a class from a string path
@@ -220,7 +222,9 @@ def model_download(model_path: str) -> str:
 
 def create_routes_semaphores(config: ConfigFile) -> Dict[str, asyncio.Semaphore]:
     semaphores = {}
-    semaphores[config.cogito.get_predictor] = asyncio.Semaphore(config.cogito.get_server_threads)
+    semaphores[config.cogito.get_predictor] = asyncio.Semaphore(
+        config.cogito.get_server_threads
+    )
 
     return semaphores
 

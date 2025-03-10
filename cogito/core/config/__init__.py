@@ -2,4 +2,4 @@
 
 from cogito.core.config.file import ConfigFile
 
-__all__ = ["ConfigFile"] 
+__all__ = ["ConfigFile"]
