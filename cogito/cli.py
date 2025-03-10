@@ -1,7 +1,7 @@
 import click
 
 from cogito.commands.initialize import init
-from cogito.commands.scaffold_predict import scaffold
+from cogito.commands.scaffold import scaffold
 from cogito.commands.run import run
 from cogito.commands.predict import predict
 from cogito.commands.version import version

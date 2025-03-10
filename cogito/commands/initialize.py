@@ -1,6 +1,6 @@
 import click
 
-from cogito.commands.scaffold_predict import scaffold_predict_classes
+from cogito.commands.scaffold import scaffold_predict_classes
 from cogito.core.config.file import ConfigFile
 
 
