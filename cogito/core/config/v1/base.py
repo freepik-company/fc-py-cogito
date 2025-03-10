@@ -3,7 +3,7 @@ from typing import Type
 from cogito.core.config.v0.base import CogitoConfig as v0
 
 from cogito.core.config.v1.server import ServerConfig
-from cogito.core.config.v1.fast_api import FastAPIConfig
+from cogito.core.config.v1.fastapi import FastAPIConfig
 from cogito.core.config.v1.route import RouteConfig
 
 

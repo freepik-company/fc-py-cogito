@@ -3,7 +3,7 @@ from typing import Type
 
 from cogito.core.config.v0.server import ServerConfig
 from cogito.core.config.v0.route import RouteConfig
-from cogito.core.config.v0.fast_api import FastAPIConfig
+from cogito.core.config.v0.fastapi import FastAPIConfig
 
 from pydantic import BaseModel
 
@@ -167,7 +167,7 @@ class CogitoConfig(BaseModel, ConfigInterface):
     @property
     def get_route_tags(self) -> list[str]:
         return self.server.route.tags
-    
+
     @property
     def get_server_threads(self) -> int:
         return self.server.threads

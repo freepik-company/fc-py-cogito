@@ -1,5 +1,5 @@
 from typing import Optional
-from cogito.core.config.v0.fast_api import FastAPIConfig
+from cogito.core.config.v0.fastapi import FastAPIConfig
 from cogito.core.config.v0.route import RouteConfig
 from pydantic import BaseModel
 
