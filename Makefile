@@ -61,8 +61,11 @@ code-style: code-style-dirty ## Check the code style and commit the changes
 pre-commit-install: ## Install pre-commit hooks
 	@pre-commit install --hook-type pre-commit --hook-type pre-push
 
-pre-commit-run: pre-commit-install ## Run the pre-commit hooks
-	@$(ACTIVATE) && pre-commit run --all-files
+pre-commit-tests: pre-commit-install ## Run the pre-commit hooks for tests
+	@$(ACTIVATE) && pre-commit run --all-files --hook-stage pre-push
+
+pre-commit-black: pre-commit-install ## Run the pre-commit hooks for black
+	@$(ACTIVATE) && pre-commit run --all-files --hook-stage pre-commit
 
 ##@ Dependencies management commands
 
