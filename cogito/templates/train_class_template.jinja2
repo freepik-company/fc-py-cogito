@@ -1,0 +1,45 @@
+from cogito.core.models import BaseTrainer
+
+{% for route in routes %}
+class {{ route.class_name }}(BaseTrainer):
+    """
+    Name: {{ route.class_data.name }}
+    Description:
+        {{ route.class_data.description | indent(8) }}
+    """
+
+    async def setup(self):
+        """
+        This method is called once before training begins.
+        """
+
+        # TODO: (USER) Implement the setup method or remove it if not needed
+
+        pass
+
+    def train(self, data_path: str, epochs: int, batch_size: int, learning_rate: float) -> dict:
+        """
+        This method is called to perform model training.
+        
+        Parameters:
+            data_path (str): Path to the training data.
+            epochs (int): Number of training epochs.
+            batch_size (int): Size of training batches.
+            learning_rate (float): Learning rate for optimization.
+            
+        Returns:
+            dict: Training metrics and results.
+        """
+
+        # TODO: (USER) Implement the training method
+        # TODO: (USER) Return training metrics (loss, accuracy, etc.)
+        return {
+            "status": "success",
+            "metrics": {
+                "loss": 0.1,
+                "accuracy": 0.95
+            },
+            "info": f"Trained on {data_path} for {epochs} epochs with batch size {batch_size} and learning rate {learning_rate}"
+        }
+
+{% endfor %} 
