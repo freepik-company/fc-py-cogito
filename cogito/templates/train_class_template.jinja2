@@ -2,11 +2,6 @@ from cogito.core.models import BaseTrainer
 
 {% for route in routes %}
 class {{ route.class_name }}(BaseTrainer):
-    """
-    Name: {{ route.class_data.name }}
-    Description:
-        {{ route.class_data.description | indent(8) }}
-    """
 
     async def setup(self):
         """
