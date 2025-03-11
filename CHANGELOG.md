@@ -1,3 +1,9 @@
+## 0.3.0a1 (2025-03-11)
+
+### Refactor
+
+- **template**: Remove docstring from train class template
+
 ## 0.3.0a0 (2025-03-11)
 
 ## 0.2.6a4 (2025-03-10)
