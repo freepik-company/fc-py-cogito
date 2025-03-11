@@ -1,3 +1,26 @@
+## 0.3.0a0 (2025-03-11)
+
+## 0.2.6a4 (2025-03-10)
+
+### Feat
+
+- **Makefile**: Enhance pre-commit hook targets
+- **Makefile**: Enhance pre-commit hook installation
+
+### Refactor
+
+- Clean up code formatting and remove redundant lines
+
+## 0.2.6a3 (2025-03-07)
+
+### Feat
+
+- Implements BadRequestError raising and 400 error code response (#94)
+
+## 0.2.6a1 (2025-03-06)
+
+## 0.2.6a0 (2025-02-27)
+
 ## 0.2.6 (2025-03-10)
 ## 0.2.6a4 (2025-03-10)
 
