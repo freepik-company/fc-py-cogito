@@ -1,8 +1,7 @@
 import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
-import asyncio
+from unittest.mock import patch, MagicMock
 
-from cogito.lib.prediction import prediction
+from cogito.lib.prediction import run, setup
 from cogito.core.exceptions import ConfigFileNotFoundError
 
 
@@ -27,31 +26,22 @@ def test_payload():
     return {"text": "sample text for prediction"}
 
 
-# Patch asyncio.run globally for all tests in this module
-# This prevents warnings about unawaited coroutines
-@pytest.fixture(autouse=True)
-def patch_asyncio():
-    with patch("cogito.lib.prediction.asyncio.run", return_value=None) as mock_run:
-        yield mock_run
-
-
-@patch("cogito.lib.prediction.ConfigFile")
+@patch("cogito.lib.prediction.build_config_file")
 @patch("cogito.lib.prediction.instance_class")
 @patch("cogito.lib.prediction.create_request_model")
 @patch("cogito.lib.prediction.get_predictor_handler_return_type")
 @patch("cogito.lib.prediction.wrap_handler")
-def test_prediction_successful(
+def test_run_successful(
     mock_wrap_handler,
     mock_get_return_type,
     mock_create_request,
     mock_instance_class,
-    mock_config_file_class,
+    mock_build_config_file,
     mock_config_file,
     test_payload,
-    patch_asyncio,
 ):
     # Setup mocks
-    mock_config_file_class.load_from_file.return_value = mock_config_file
+    mock_build_config_file.return_value = mock_config_file
 
     predictor_instance = MockPredictor()
     mock_instance_class.return_value = predictor_instance
@@ -71,12 +61,11 @@ def test_prediction_successful(
 
     # Call the function
     config_path = "/path/to/cogito.yaml"
-    result = prediction(config_path, test_payload)
+    result = run(config_path, test_payload)
 
     # Assertions
-    mock_config_file_class.load_from_file.assert_called_once_with(config_path)
-    mock_instance_class.assert_called_once_with("test_predictor")
-    patch_asyncio.assert_called_once()
+    mock_build_config_file.assert_called_once_with(config_path)
+    mock_instance_class.assert_called_once_with(mock_config_file.cogito.get_predictor)
     mock_create_request.assert_called_once()
     mock_get_return_type.assert_called_once_with(predictor_instance)
     mock_wrap_handler.assert_called_once()
@@ -86,42 +75,93 @@ def test_prediction_successful(
     assert result == expected_response
 
 
-@patch("cogito.lib.prediction.ConfigFile")
-def test_prediction_config_not_found(mock_config_file_class, test_payload):
+@patch("cogito.lib.prediction.build_config_file")
+def test_run_config_not_found(mock_build_config_file, test_payload):
     # Setup mock to raise the exception
-    mock_config_file_class.load_from_file.side_effect = ConfigFileNotFoundError(
+    mock_build_config_file.side_effect = ConfigFileNotFoundError(
         file_path="/path/to/nonexistent/cogito.yaml"
     )
 
     # Call the function and check for raised exception
     with pytest.raises(ConfigFileNotFoundError):
-        prediction("/path/to/nonexistent/cogito.yaml", test_payload)
+        run("/path/to/nonexistent/cogito.yaml", test_payload)
 
 
-@patch("cogito.lib.prediction.ConfigFile")
+@patch("cogito.lib.prediction.build_config_file")
 @patch("cogito.lib.prediction.instance_class")
-def test_prediction_general_exception(
+def test_run_general_exception(
     mock_instance_class,
-    mock_config_file_class,
+    mock_build_config_file,
     mock_config_file,
     test_payload,
-    patch_asyncio,
 ):
     # Setup mocks
-    mock_config_file_class.load_from_file.return_value = mock_config_file
+    mock_build_config_file.return_value = mock_config_file
 
     # Create a regular exception instead of a mock that creates a coroutine
     class TestException(Exception):
         pass
 
-    # Raise the exception immediately when instance_class is called,
-    # before any AsyncMock methods would be accessed
+    # Raise the exception immediately when instance_class is called
     mock_instance_class.side_effect = TestException("Test exception")
 
-    # Call the function and check for raised exception - exception should be raised
-    # before asyncio.run is ever called
+    # Call the function and check for raised exception
     with pytest.raises(TestException) as excinfo:
-        prediction("/path/to/cogito.yaml", test_payload)
+        run("/path/to/cogito.yaml", test_payload)
 
     assert "Test exception" in str(excinfo.value)
-    patch_asyncio.assert_not_called()  # Should never reach this point
+
+
+@patch("cogito.lib.prediction.build_config_file")
+@patch("cogito.lib.prediction.instance_class")
+def test_setup_successful(
+    mock_instance_class, mock_build_config_file, mock_config_file
+):
+    # Setup mocks
+    mock_build_config_file.return_value = mock_config_file
+
+    predictor_instance = MockPredictor()
+    mock_instance_class.return_value = predictor_instance
+
+    # Call setup function
+    config_path = "/path/to/cogito.yaml"
+    setup(config_path)
+
+    # Assertions
+    mock_build_config_file.assert_called_once_with(config_path)
+    mock_instance_class.assert_called_once_with(mock_config_file.cogito.get_predictor)
+    predictor_instance.setup.assert_called_once()
+
+
+@patch("cogito.lib.prediction.build_config_file")
+def test_setup_config_not_found(mock_build_config_file):
+    # Setup mock to raise the exception
+    mock_build_config_file.side_effect = ConfigFileNotFoundError(
+        file_path="/path/to/nonexistent/cogito.yaml"
+    )
+
+    # Call the function and check for raised exception
+    with pytest.raises(ConfigFileNotFoundError):
+        setup("/path/to/nonexistent/cogito.yaml")
+
+
+@patch("cogito.lib.prediction.build_config_file")
+@patch("cogito.lib.prediction.instance_class")
+def test_setup_general_exception(
+    mock_instance_class, mock_build_config_file, mock_config_file
+):
+    # Setup mocks
+    mock_build_config_file.return_value = mock_config_file
+
+    # Create and setup the exception
+    mock_predictor = MockPredictor()
+    mock_instance_class.return_value = mock_predictor
+
+    error_message = "Error in setup"
+    mock_predictor.setup.side_effect = Exception(error_message)
+
+    # Call the function and check for raised exception
+    with pytest.raises(Exception) as excinfo:
+        setup("/path/to/cogito.yaml")
+
+    assert error_message in str(excinfo.value)

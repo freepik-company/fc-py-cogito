@@ -41,6 +41,9 @@ def instance_class(class_path) -> Any:
     """
     Instance a class from a string path
     """
+    if not class_path:
+        raise ValueError(f"No class path {class_path} specified.")
+
     path, class_name = class_path.split(":")
     module = importlib.import_module(f"{path}")
 

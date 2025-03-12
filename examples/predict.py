@@ -25,6 +25,6 @@ class Predictor(BasePredictor):
             image="https://example.com/image.jpg", text="Hello world"
         )
 
-    async def setup(self):
+    def setup(self):
         time.sleep(3)
         logging.info("I'm ready")

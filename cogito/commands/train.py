@@ -3,7 +3,7 @@ import json
 import click
 
 from cogito.core.exceptions import ConfigFileNotFoundError
-from cogito.lib.training import training
+from cogito.lib.training import run, setup
 
 
 @click.command()
@@ -20,7 +20,9 @@ def train(ctx: click.Context, payload: str) -> None:
         config_path = ctx.get("config_path")
         payload_data = json.loads(payload)
 
-        result = training(config_path, payload_data)
+        setup(config_path)
+        result = run(config_path, payload_data)
+
         click.echo(result)
     except ConfigFileNotFoundError:
         click.echo("No configuration file found. Please initialize the project first.")
