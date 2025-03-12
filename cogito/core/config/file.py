@@ -1,5 +1,7 @@
 import importlib
+import os
 from pathlib import Path
+import sys
 from typing import Dict, Optional, Type
 
 import yaml
@@ -116,3 +118,18 @@ class ConfigFile(BaseModel):
         self.config_version = DEFAULT_CONFIG_VERSION
 
         return self
+
+
+def build_config_file(config_path: str) -> ConfigFile:
+    """
+    Get the path to the configuration file
+    """
+    app_dir = os.path.dirname(os.path.abspath(config_path))
+    sys.path.insert(0, app_dir)
+
+    try:
+        config = ConfigFile.load_from_file(f"{config_path}")
+    except ConfigFileNotFoundError:
+        raise
+
+    return config
