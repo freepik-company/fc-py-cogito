@@ -43,7 +43,7 @@ def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
             f.write(rendered_content)
 
 
-def scaffold_train_classes(config: ConfigFile, force: bool = False) -> None:
+def scaffold_train_classes(config: ConfigFile, force: bool = False) -> bool:
     template_dir = os.path.join(os.path.dirname(__file__), "..", "templates")
     env = Environment(loader=FileSystemLoader(template_dir))
     template = env.get_template("train_class_template.jinja2")
@@ -55,6 +55,12 @@ def scaffold_train_classes(config: ConfigFile, force: bool = False) -> None:
     # Check if trainer is defined in config, default to 'train:Trainer' if not found
     trainer = getattr(config.cogito, "trainer", "train:Trainer")
     route = config.cogito.server.route
+
+    if not trainer:
+        click.echo(
+            "No trainer defined in config. Please define a trainer in the config file."
+        )
+        return False
 
     file_name = f'{trainer.split(":")[0]}.py'
     class_name = trainer.split(":")[1]
@@ -78,6 +84,8 @@ def scaffold_train_classes(config: ConfigFile, force: bool = False) -> None:
         rendered_content = template.render(file=files, routes=routes)
         with open(file, "w") as f:
             f.write(rendered_content)
+
+    return True
 
 
 @click.command()
@@ -110,13 +118,13 @@ def scaffold(
 
     if not predict and not train:
         click.echo("Error: You must specify at least one of --predict or --train")
-        return
+        exit(1)
 
     try:
         config = ConfigFile.load_from_file(f"{config_path}")
     except ConfigFileNotFoundError:
         click.echo("No configuration file found. Please initialize the project first.")
-        return
+        exit(1)
 
     if predict:
         click.echo("Generating predict classes...")
@@ -124,4 +132,5 @@ def scaffold(
 
     if train:
         click.echo("Generating train classes...")
-        scaffold_train_classes(config, force)
+        if not scaffold_train_classes(config, force):
+            exit(1)
