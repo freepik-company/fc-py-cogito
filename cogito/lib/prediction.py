@@ -1,9 +1,10 @@
+from cogito.core.config.file import build_config_file
 from cogito.core.utils import (
     create_request_model,
     get_predictor_handler_return_type,
+    instance_class,
     wrap_handler,
 )
-from cogito.lib.common import _config_file_path, _get_instance_class
 
 
 def setup(config_path) -> None:
@@ -11,8 +12,8 @@ def setup(config_path) -> None:
     Setup the prediction process
     """
 
-    config = _config_file_path(config_path)
-    predictor = _get_instance_class(config.cogito.get_predictor)
+    config = build_config_file(config_path)
+    predictor = instance_class(config.cogito.get_predictor)
 
     try:
         predictor.setup()
@@ -25,9 +26,9 @@ def run(config_path, payload_data) -> dict:
     Predict a model using the payload data
     """
 
-    config = _config_file_path(config_path)
+    config = build_config_file(config_path)
     predictor_path = config.cogito.get_predictor
-    predictor_instance = _get_instance_class(config.cogito.get_predictor)
+    predictor_instance = instance_class(config.cogito.get_predictor)
 
     # Create input model from payload
     _, input_model_class = create_request_model(

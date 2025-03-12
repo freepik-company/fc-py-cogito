@@ -1,4 +1,5 @@
-from cogito.lib.common import _config_file_path, _get_instance_class
+from cogito.core.config.file import build_config_file
+from cogito.core.utils import instance_class
 
 
 def setup(config_path) -> None:
@@ -6,8 +7,8 @@ def setup(config_path) -> None:
     Setup the training process
     """
 
-    config = _config_file_path(config_path)
-    trainer = _get_instance_class(config.cogito.get_trainer)
+    config = build_config_file(config_path)
+    trainer = instance_class(config.cogito.get_trainer)
 
     # Run the setup
     try:
@@ -21,8 +22,8 @@ def run(config_path, payload_data):
     Train a model using the payload data
     """
 
-    config = _config_file_path(config_path)
-    trainer = _get_instance_class(config.cogito.get_trainer)
+    config = build_config_file(config_path)
+    trainer = instance_class(config.cogito.get_trainer)
 
     # Call train method with payload data
     try:
