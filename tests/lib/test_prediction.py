@@ -26,8 +26,8 @@ def test_payload():
     return {"text": "sample text for prediction"}
 
 
-@patch("cogito.lib.prediction._config_file_path")
-@patch("cogito.lib.prediction._get_instance_class")
+@patch("cogito.lib.prediction.build_config_file")
+@patch("cogito.lib.prediction.instance_class")
 @patch("cogito.lib.prediction.create_request_model")
 @patch("cogito.lib.prediction.get_predictor_handler_return_type")
 @patch("cogito.lib.prediction.wrap_handler")
@@ -36,12 +36,12 @@ def test_run_successful(
     mock_get_return_type,
     mock_create_request,
     mock_instance_class,
-    mock_config_file_class,
+    mock_build_config_file,
     mock_config_file,
     test_payload,
 ):
     # Setup mocks
-    mock_config_file_class.return_value = mock_config_file
+    mock_build_config_file.return_value = mock_config_file
 
     predictor_instance = MockPredictor()
     mock_instance_class.return_value = predictor_instance
@@ -64,7 +64,7 @@ def test_run_successful(
     result = run(config_path, test_payload)
 
     # Assertions
-    mock_config_file_class.assert_called_once_with(config_path)
+    mock_build_config_file.assert_called_once_with(config_path)
     mock_instance_class.assert_called_once_with(mock_config_file.cogito.get_predictor)
     mock_create_request.assert_called_once()
     mock_get_return_type.assert_called_once_with(predictor_instance)
@@ -75,10 +75,10 @@ def test_run_successful(
     assert result == expected_response
 
 
-@patch("cogito.lib.prediction._config_file_path")
-def test_run_config_not_found(mock_config_file_class, test_payload):
+@patch("cogito.lib.prediction.build_config_file")
+def test_run_config_not_found(mock_build_config_file, test_payload):
     # Setup mock to raise the exception
-    mock_config_file_class.side_effect = ConfigFileNotFoundError(
+    mock_build_config_file.side_effect = ConfigFileNotFoundError(
         file_path="/path/to/nonexistent/cogito.yaml"
     )
 
@@ -87,16 +87,16 @@ def test_run_config_not_found(mock_config_file_class, test_payload):
         run("/path/to/nonexistent/cogito.yaml", test_payload)
 
 
-@patch("cogito.lib.prediction._config_file_path")
-@patch("cogito.lib.prediction._get_instance_class")
+@patch("cogito.lib.prediction.build_config_file")
+@patch("cogito.lib.prediction.instance_class")
 def test_run_general_exception(
     mock_instance_class,
-    mock_config_file_class,
+    mock_build_config_file,
     mock_config_file,
     test_payload,
 ):
     # Setup mocks
-    mock_config_file_class.return_value = mock_config_file
+    mock_build_config_file.return_value = mock_config_file
 
     # Create a regular exception instead of a mock that creates a coroutine
     class TestException(Exception):
@@ -112,13 +112,13 @@ def test_run_general_exception(
     assert "Test exception" in str(excinfo.value)
 
 
-@patch("cogito.lib.prediction._config_file_path")
-@patch("cogito.lib.prediction._get_instance_class")
+@patch("cogito.lib.prediction.build_config_file")
+@patch("cogito.lib.prediction.instance_class")
 def test_setup_successful(
-    mock_instance_class, mock_config_file_class, mock_config_file
+    mock_instance_class, mock_build_config_file, mock_config_file
 ):
     # Setup mocks
-    mock_config_file_class.return_value = mock_config_file
+    mock_build_config_file.return_value = mock_config_file
 
     predictor_instance = MockPredictor()
     mock_instance_class.return_value = predictor_instance
@@ -128,15 +128,15 @@ def test_setup_successful(
     setup(config_path)
 
     # Assertions
-    mock_config_file_class.assert_called_once_with(config_path)
+    mock_build_config_file.assert_called_once_with(config_path)
     mock_instance_class.assert_called_once_with(mock_config_file.cogito.get_predictor)
     predictor_instance.setup.assert_called_once()
 
 
-@patch("cogito.lib.prediction._config_file_path")
-def test_setup_config_not_found(mock_config_file_class):
+@patch("cogito.lib.prediction.build_config_file")
+def test_setup_config_not_found(mock_build_config_file):
     # Setup mock to raise the exception
-    mock_config_file_class.side_effect = ConfigFileNotFoundError(
+    mock_build_config_file.side_effect = ConfigFileNotFoundError(
         file_path="/path/to/nonexistent/cogito.yaml"
     )
 
@@ -145,13 +145,13 @@ def test_setup_config_not_found(mock_config_file_class):
         setup("/path/to/nonexistent/cogito.yaml")
 
 
-@patch("cogito.lib.prediction._config_file_path")
-@patch("cogito.lib.prediction._get_instance_class")
+@patch("cogito.lib.prediction.build_config_file")
+@patch("cogito.lib.prediction.instance_class")
 def test_setup_general_exception(
-    mock_instance_class, mock_config_file_class, mock_config_file
+    mock_instance_class, mock_build_config_file, mock_config_file
 ):
     # Setup mocks
-    mock_config_file_class.return_value = mock_config_file
+    mock_build_config_file.return_value = mock_config_file
 
     # Create and setup the exception
     mock_predictor = MockPredictor()

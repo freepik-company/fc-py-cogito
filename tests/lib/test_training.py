@@ -21,13 +21,13 @@ class MockTrainer:
 
 class TestTraining(unittest.TestCase):
 
-    @patch("cogito.lib.training._config_file_path")
-    @patch("cogito.lib.training._get_instance_class")
-    def test_run_success(self, mock_instance_class, mock_load_config):
+    @patch("cogito.lib.training.build_config_file")
+    @patch("cogito.lib.training.instance_class")
+    def test_run_success(self, mock_instance_class, mock_build_config_file):
         # Setup
         mock_config = MagicMock()
         mock_config.cogito.get_trainer = "path.to.MockTrainer"
-        mock_load_config.return_value = mock_config
+        mock_build_config_file.return_value = mock_config
 
         mock_trainer = MockTrainer()
         mock_instance_class.return_value = mock_trainer
@@ -45,7 +45,7 @@ class TestTraining(unittest.TestCase):
 
         # Verify
         # Check that the config was loaded with the correct path
-        mock_load_config.assert_called_once_with(config_path)
+        mock_build_config_file.assert_called_once_with(config_path)
 
         # Check that instance_class was called with the correct trainer path
         mock_instance_class.assert_called_once_with("path.to.MockTrainer")
@@ -57,11 +57,11 @@ class TestTraining(unittest.TestCase):
         expected_result = {"model_accuracy": 0.95, "training_complete": True}
         self.assertEqual(result, expected_result)
 
-    @patch("cogito.lib.training._config_file_path")
-    def test_run_config_not_found(self, mock_load_config):
+    @patch("cogito.lib.training.build_config_file")
+    def test_run_config_not_found(self, mock_build_config_file):
         # Setup - simulate config file not found
         # Pass the required file_path argument to the ConfigFileNotFoundError constructor
-        mock_load_config.side_effect = ConfigFileNotFoundError(
+        mock_build_config_file.side_effect = ConfigFileNotFoundError(
             file_path="/path/to/nonexistent/cogito.yaml"
         )
 
@@ -69,13 +69,13 @@ class TestTraining(unittest.TestCase):
         with self.assertRaises(ConfigFileNotFoundError):
             run("/path/to/nonexistent/cogito.yaml", {})
 
-    @patch("cogito.lib.training._config_file_path")
-    @patch("cogito.lib.training._get_instance_class")
-    def test_run_general_exception(self, mock_instance_class, mock_load_config):
+    @patch("cogito.lib.training.build_config_file")
+    @patch("cogito.lib.training.instance_class")
+    def test_run_general_exception(self, mock_instance_class, mock_build_config_file):
         # Setup
         mock_config = MagicMock()
         mock_config.cogito.get_trainer = "path.to.MockTrainer"
-        mock_load_config.return_value = mock_config
+        mock_build_config_file.return_value = mock_config
 
         # Create and setup the exception
         error_message = "Training error"
@@ -87,16 +87,16 @@ class TestTraining(unittest.TestCase):
 
         self.assertIn(error_message, str(context.exception))
 
-    @patch("cogito.lib.training._config_file_path")
-    @patch("cogito.lib.training._get_instance_class")
+    @patch("cogito.lib.training.build_config_file")
+    @patch("cogito.lib.training.instance_class")
     @patch("sys.path")
     def test_run_with_app_dir_in_path(
-        self, mock_sys_path, mock_instance_class, mock_load_config
+        self, mock_sys_path, mock_instance_class, mock_build_config_file
     ):
         # Setup
         mock_config = MagicMock()
         mock_config.cogito.get_trainer = "path.to.MockTrainer"
-        mock_load_config.return_value = mock_config
+        mock_build_config_file.return_value = mock_config
 
         mock_trainer = MockTrainer()
         mock_instance_class.return_value = mock_trainer
@@ -112,13 +112,13 @@ class TestTraining(unittest.TestCase):
         # Instead of patching sys.path.insert, we patch sys.path and check that insert was called
         mock_sys_path.insert.assert_not_called()  # Should not be called in our implementation
 
-    @patch("cogito.lib.training._config_file_path")
-    @patch("cogito.lib.training._get_instance_class")
-    def test_setup_success(self, mock_instance_class, mock_load_config):
+    @patch("cogito.lib.training.build_config_file")
+    @patch("cogito.lib.training.instance_class")
+    def test_setup_success(self, mock_instance_class, mock_build_config_file):
         # Setup
         mock_config = MagicMock()
         mock_config.cogito.get_trainer = "path.to.MockTrainer"
-        mock_load_config.return_value = mock_config
+        mock_build_config_file.return_value = mock_config
 
         mock_trainer = MockTrainer()
         mock_instance_class.return_value = mock_trainer
@@ -127,14 +127,14 @@ class TestTraining(unittest.TestCase):
         setup("/path/to/cogito.yaml")
 
         # Verify
-        mock_load_config.assert_called_once_with("/path/to/cogito.yaml")
+        mock_build_config_file.assert_called_once_with("/path/to/cogito.yaml")
         mock_instance_class.assert_called_once_with("path.to.MockTrainer")
         mock_trainer.setup.assert_called_once()
 
-    @patch("cogito.lib.training._config_file_path")
-    def test_setup_config_not_found(self, mock_load_config):
+    @patch("cogito.lib.training.build_config_file")
+    def test_setup_config_not_found(self, mock_build_config_file):
         # Setup - simulate config file not found
-        mock_load_config.side_effect = ConfigFileNotFoundError(
+        mock_build_config_file.side_effect = ConfigFileNotFoundError(
             file_path="/path/to/nonexistent/cogito.yaml"
         )
 
@@ -142,13 +142,13 @@ class TestTraining(unittest.TestCase):
         with self.assertRaises(ConfigFileNotFoundError):
             setup("/path/to/nonexistent/cogito.yaml")
 
-    @patch("cogito.lib.training._config_file_path")
-    @patch("cogito.lib.training._get_instance_class")
-    def test_setup_general_exception(self, mock_instance_class, mock_load_config):
+    @patch("cogito.lib.training.build_config_file")
+    @patch("cogito.lib.training.instance_class")
+    def test_setup_general_exception(self, mock_instance_class, mock_build_config_file):
         # Setup
         mock_config = MagicMock()
         mock_config.cogito.get_trainer = "path.to.MockTrainer"
-        mock_load_config.return_value = mock_config
+        mock_build_config_file.return_value = mock_config
 
         mock_trainer = MockTrainer()
         mock_instance_class.return_value = mock_trainer
