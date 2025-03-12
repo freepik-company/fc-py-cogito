@@ -3,7 +3,7 @@ from cogito.core.models import BaseTrainer
 
 
 class Trainer(BaseTrainer):
-    async def setup(self):
+    def setup(self):
         pass
 
     def train(
