@@ -7,71 +7,78 @@ from cogito.commands.train import train
 from cogito.core.exceptions import ConfigFileNotFoundError
 
 
-@pytest.fixture
-def runner():
-    return CliRunner()
-
-
-@pytest.fixture
-def valid_payload():
-    return json.dumps({"model": "test_model", "data": {"x": [1, 2, 3], "y": [4, 5, 6]}})
-
-
 class TestTrainCommand:
-    @patch("cogito.commands.train.training")
-    def test_train_success(self, mock_training, runner, valid_payload):
-        """Test train command with valid payload"""
-        # Setup
-        mock_training.return_value = {"status": "success", "model_id": "123"}
-        ctx = {"config_path": "/path/to/config.yaml"}
+    @pytest.fixture
+    def runner(self):
+        return CliRunner()
 
-        # Execute
-        result = runner.invoke(train, ["--payload", valid_payload], obj=ctx)
-
-        # Verify
-        assert result.exit_code == 0
-        mock_training.assert_called_once_with(
-            "/path/to/config.yaml", json.loads(valid_payload)
+    @pytest.fixture
+    def valid_payload(self):
+        return json.dumps(
+            {"model": "test_model", "data": {"x": [1, 2, 3], "y": [4, 5, 6]}}
         )
-        assert "{'status': 'success', 'model_id': '123'}" in result.output
 
-    @patch("cogito.commands.train.training")
-    def test_train_config_not_found(self, mock_training, runner, valid_payload):
-        """Test train command when config file is not found"""
-        # Setup
-        mock_training.side_effect = ConfigFileNotFoundError("Config file not found")
-        ctx = {"config_path": "/path/to/config.yaml"}
+    @patch("cogito.commands.train.setup")
+    @patch("cogito.commands.train.run")
+    def test_train_success(self, mock_run, mock_setup, runner, valid_payload):
+        # Arrange
+        mock_ctx = MagicMock()
+        mock_ctx.get.return_value = "/path/to/cogito.yaml"
 
-        # Execute
-        result = runner.invoke(train, ["--payload", valid_payload], obj=ctx)
+        mock_run.return_value = {"accuracy": 0.95, "loss": 0.05}
 
-        # Verify
+        # Act
+        result = runner.invoke(train, ["--payload", valid_payload], obj=mock_ctx)
+
+        # Assert
+        assert result.exit_code == 0
+        mock_setup.assert_called_once_with("/path/to/cogito.yaml")
+        mock_run.assert_called_once()
+        assert "accuracy" in result.output
+        assert "0.95" in result.output
+
+    @patch("cogito.commands.train.setup")
+    @patch("cogito.commands.train.run")
+    def test_train_config_not_found(self, mock_run, mock_setup, runner, valid_payload):
+        # Arrange
+        mock_ctx = MagicMock()
+        mock_ctx.get.return_value = "/path/to/nonexistent/cogito.yaml"
+
+        mock_setup.side_effect = ConfigFileNotFoundError(
+            file_path="/path/to/nonexistent/cogito.yaml"
+        )
+
+        # Act
+        result = runner.invoke(train, ["--payload", valid_payload], obj=mock_ctx)
+
+        # Assert
         assert result.exit_code == 1
         assert "No configuration file found" in result.output
 
-    @patch("cogito.commands.train.training")
-    def test_train_general_exception(self, mock_training, runner, valid_payload):
-        """Test train command when an unexpected error occurs"""
-        # Setup
-        mock_training.side_effect = Exception("Some unexpected error")
-        ctx = {"config_path": "/path/to/config.yaml"}
+    @patch("cogito.commands.train.setup")
+    @patch("cogito.commands.train.run")
+    def test_train_general_exception(self, mock_run, mock_setup, runner, valid_payload):
+        # Arrange
+        mock_ctx = MagicMock()
+        mock_ctx.get.return_value = "/path/to/cogito.yaml"
 
-        # Execute
-        result = runner.invoke(train, ["--payload", valid_payload], obj=ctx)
+        mock_setup.side_effect = Exception("Something went wrong during training")
 
-        # Verify
+        # Act
+        result = runner.invoke(train, ["--payload", valid_payload], obj=mock_ctx)
+
+        # Assert
         assert result.exit_code == 1
-        assert "Error: Some unexpected error" in result.output
+        assert "Error: Something went wrong during training" in result.output
 
     def test_train_invalid_json(self, runner):
-        """Test train command with invalid JSON payload"""
-        # Setup
-        invalid_payload = "not valid json"
-        ctx = {"config_path": "/path/to/config.yaml"}
+        # Arrange
+        mock_ctx = MagicMock()
+        mock_ctx.get.return_value = "/path/to/cogito.yaml"
 
-        # Execute
-        result = runner.invoke(train, ["--payload", invalid_payload], obj=ctx)
+        # Act
+        result = runner.invoke(train, ["--payload", "invalid-json"], obj=mock_ctx)
 
-        # Verify
+        # Assert
         assert result.exit_code == 1
-        assert "Error:" in result.output
+        assert "Error: " in result.output
