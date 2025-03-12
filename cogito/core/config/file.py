@@ -78,8 +78,8 @@ class ConfigFile(BaseModel):
                 return cls(**yaml_data)
         except FileNotFoundError:
             raise ConfigFileNotFoundError(file_path)
-        except Exception:
-            raise ValueError(f"Error loading configuration file {file_path}")
+        except Exception as e:
+            raise ValueError(f"Error loading configuration file {file_path}: {e}")
 
     def save_to_file(self, file_path: str) -> None:
         """Save the configuration to a file."""
