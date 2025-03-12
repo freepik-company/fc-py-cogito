@@ -3,7 +3,7 @@ from cogito.core.models import BaseTrainer
 {% for route in routes %}
 class {{ route.class_name }}(BaseTrainer):
 
-    async def setup(self):
+    def setup(self):
         """
         This method is called once before training begins.
         """
