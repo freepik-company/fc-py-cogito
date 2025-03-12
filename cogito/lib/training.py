@@ -1,36 +1,33 @@
-import asyncio
-import os
-import sys
-
-from cogito.core.config.file import ConfigFile
-from cogito.core.exceptions import ConfigFileNotFoundError
-from cogito.core.utils import instance_class
+from cogito.lib.common import _config_file_path, _get_instance_class
 
 
-def training(config_path, payload_data):
+def setup(config_path) -> None:
+    """
+    Setup the training process
+    """
+
+    config = _config_file_path(config_path)
+    trainer = _get_instance_class(config.cogito.get_trainer)
+
+    # Run the setup
+    try:
+        trainer.setup()
+    except Exception as e:
+        raise Exception(f"Error setting up the trainer: {e}")
+
+
+def run(config_path, payload_data):
     """
     Train a model using the payload data
     """
-    app_dir = os.path.dirname(os.path.abspath(config_path))
-    sys.path.insert(0, app_dir)
 
-    try:
-        config = ConfigFile.load_from_file(f"{config_path}")
-    except ConfigFileNotFoundError:
-        raise ConfigFileNotFoundError(
-            "No configuration file found. Please initialize the project first."
-        )
-
-    if config.cogito.get_trainer == "":
-        raise ValueError("No trainer specified in the configuration file.")
-
-    # Load training instance using the path to the cogito.yaml file
-    trainer = instance_class(config.cogito.get_trainer)
-
-    # Run setup method asynchronously
-    asyncio.run(trainer.setup())
+    config = _config_file_path(config_path)
+    trainer = _get_instance_class(config.cogito.get_trainer)
 
     # Call train method with payload data
-    result = trainer.train(**payload_data)
+    try:
+        result = trainer.train(**payload_data)
+    except Exception as e:
+        raise Exception(f"Error training the model: {e}")
 
     return result
