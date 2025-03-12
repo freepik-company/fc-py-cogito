@@ -1,3 +1,9 @@
+## 0.3.0a2 (2025-03-12)
+
+### Refactor
+
+- setup process and library refactoring
+
 ## 0.3.0a1 (2025-03-11)
 
 ### Refactor
