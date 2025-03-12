@@ -17,9 +17,7 @@ def _config_file_path(config_path: str) -> ConfigFile:
     try:
         config = ConfigFile.load_from_file(f"{config_path}")
     except ConfigFileNotFoundError:
-        raise ConfigFileNotFoundError(
-            "No configuration file found. Please initialize the project first."
-        )
+        raise
 
     return config
 
