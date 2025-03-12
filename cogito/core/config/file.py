@@ -12,6 +12,7 @@ from cogito.core.exceptions import ConfigFileNotFoundError
 
 # Constants
 DEFAULT_CONFIG_VERSION = 1
+NO_CONFIG_VERSION = 0
 
 # Configuration version mapping
 CONFIG_VERSION_MAP: Dict[int, str] = {
@@ -65,7 +66,7 @@ class ConfigFile(BaseModel):
                 yaml_data = yaml.safe_load(file)
 
                 if "config_version" not in yaml_data:
-                    yaml_data["config_version"] = DEFAULT_CONFIG_VERSION
+                    yaml_data["config_version"] = NO_CONFIG_VERSION
 
                 cogito_data = yaml_data.get("cogito", {})
                 config_version = yaml_data["config_version"]
