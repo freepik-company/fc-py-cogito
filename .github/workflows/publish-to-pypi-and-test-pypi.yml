@@ -28,7 +28,8 @@ jobs:
 
   build:
     name: Build distribution 📦
-    needs: [test]  # Make build depend on successful test completion
+    needs: 
+      - test  # Make build depend on successful test completion
     runs-on: ubuntu-latest
 
     steps:
