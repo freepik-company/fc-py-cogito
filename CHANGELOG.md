@@ -1,3 +1,9 @@
+## 0.3.0a3 (2025-03-13)
+
+### Feat
+
+- **ci**: Add testing job to GitHub Actions workflow for PyPI publishing (#107)
+
 ## 0.3.0a2 (2025-03-12)
 
 ### Refactor
