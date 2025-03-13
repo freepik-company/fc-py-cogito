@@ -10,7 +10,7 @@ class {{ route.class_name }}(BasePredictor):
     Tags: {{ route.class_data.tags }}
     """
 
-    async def setup(self):
+    def setup(self):
         """
         This method is called once before the first prediction is made.
         """
