@@ -122,14 +122,11 @@ jobs:
     needs:
     - build
     runs-on: ubuntu-latest
-
     environment:
       name: testpypi
       url: https://test.pypi.org/project/cogito/
-
     permissions:
       id-token: write  # IMPORTANT: mandatory for trusted publishing
-
     steps:
     - name: Download all the dists
       uses: actions/download-artifact@v4
@@ -140,3 +137,4 @@ jobs:
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
         repository-url: https://test.pypi.org/legacy/
+        skip-existing: true
