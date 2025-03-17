@@ -7,21 +7,7 @@ from cogito.core.utils import (
 )
 
 
-def setup(config_path) -> None:
-    """
-    Setup the prediction process
-    """
-
-    config = build_config_file(config_path)
-    predictor = instance_class(config.cogito.get_predictor)
-
-    try:
-        predictor.setup()
-    except Exception as e:
-        raise Exception(f"Error setting up the predictor: {e}")
-
-
-def run(config_path, payload_data) -> dict:
+def run(config_path, payload_data, run_setup=True) -> dict:
     """
     Predict a model using the payload data
     """
@@ -29,6 +15,17 @@ def run(config_path, payload_data) -> dict:
     config = build_config_file(config_path)
     predictor_path = config.cogito.get_predictor
     predictor_instance = instance_class(config.cogito.get_predictor)
+
+    # Run setup if needed
+    try:
+        if (
+            hasattr(predictor_instance, "setup")
+            and callable(getattr(predictor_instance, "setup"))
+            and run_setup
+        ):
+            predictor_instance.setup()
+    except Exception as e:
+        raise Exception(f"Error setting up the predictor: {e}")
 
     # Create input model from payload
     _, input_model_class = create_request_model(
