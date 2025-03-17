@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from cogito.lib.prediction import run, setup
+from cogito.lib.prediction import run
 from cogito.core.exceptions import ConfigFileNotFoundError
 
 
@@ -110,58 +110,3 @@ def test_run_general_exception(
         run("/path/to/cogito.yaml", test_payload)
 
     assert "Test exception" in str(excinfo.value)
-
-
-@patch("cogito.lib.prediction.build_config_file")
-@patch("cogito.lib.prediction.instance_class")
-def test_setup_successful(
-    mock_instance_class, mock_build_config_file, mock_config_file
-):
-    # Setup mocks
-    mock_build_config_file.return_value = mock_config_file
-
-    predictor_instance = MockPredictor()
-    mock_instance_class.return_value = predictor_instance
-
-    # Call setup function
-    config_path = "/path/to/cogito.yaml"
-    setup(config_path)
-
-    # Assertions
-    mock_build_config_file.assert_called_once_with(config_path)
-    mock_instance_class.assert_called_once_with(mock_config_file.cogito.get_predictor)
-    predictor_instance.setup.assert_called_once()
-
-
-@patch("cogito.lib.prediction.build_config_file")
-def test_setup_config_not_found(mock_build_config_file):
-    # Setup mock to raise the exception
-    mock_build_config_file.side_effect = ConfigFileNotFoundError(
-        file_path="/path/to/nonexistent/cogito.yaml"
-    )
-
-    # Call the function and check for raised exception
-    with pytest.raises(ConfigFileNotFoundError):
-        setup("/path/to/nonexistent/cogito.yaml")
-
-
-@patch("cogito.lib.prediction.build_config_file")
-@patch("cogito.lib.prediction.instance_class")
-def test_setup_general_exception(
-    mock_instance_class, mock_build_config_file, mock_config_file
-):
-    # Setup mocks
-    mock_build_config_file.return_value = mock_config_file
-
-    # Create and setup the exception
-    mock_predictor = MockPredictor()
-    mock_instance_class.return_value = mock_predictor
-
-    error_message = "Error in setup"
-    mock_predictor.setup.side_effect = Exception(error_message)
-
-    # Call the function and check for raised exception
-    with pytest.raises(Exception) as excinfo:
-        setup("/path/to/cogito.yaml")
-
-    assert error_message in str(excinfo.value)

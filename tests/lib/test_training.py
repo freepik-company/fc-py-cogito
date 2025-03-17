@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 # Add the parent directory to sys.path to allow importing cogito modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from cogito.lib.training import run, setup
+from cogito.lib.training import run
 from cogito.core.exceptions import ConfigFileNotFoundError
 
 
@@ -111,57 +111,6 @@ class TestTraining(unittest.TestCase):
         # Verify sys.path was modified correctly
         # Instead of patching sys.path.insert, we patch sys.path and check that insert was called
         mock_sys_path.insert.assert_not_called()  # Should not be called in our implementation
-
-    @patch("cogito.lib.training.build_config_file")
-    @patch("cogito.lib.training.instance_class")
-    def test_setup_success(self, mock_instance_class, mock_build_config_file):
-        # Setup
-        mock_config = MagicMock()
-        mock_config.cogito.get_trainer = "path.to.MockTrainer"
-        mock_build_config_file.return_value = mock_config
-
-        mock_trainer = MockTrainer()
-        mock_instance_class.return_value = mock_trainer
-
-        # Execute
-        setup("/path/to/cogito.yaml")
-
-        # Verify
-        mock_build_config_file.assert_called_once_with("/path/to/cogito.yaml")
-        mock_instance_class.assert_called_once_with("path.to.MockTrainer")
-        mock_trainer.setup.assert_called_once()
-
-    @patch("cogito.lib.training.build_config_file")
-    def test_setup_config_not_found(self, mock_build_config_file):
-        # Setup - simulate config file not found
-        mock_build_config_file.side_effect = ConfigFileNotFoundError(
-            file_path="/path/to/nonexistent/cogito.yaml"
-        )
-
-        # Execute and verify exception is raised
-        with self.assertRaises(ConfigFileNotFoundError):
-            setup("/path/to/nonexistent/cogito.yaml")
-
-    @patch("cogito.lib.training.build_config_file")
-    @patch("cogito.lib.training.instance_class")
-    def test_setup_general_exception(self, mock_instance_class, mock_build_config_file):
-        # Setup
-        mock_config = MagicMock()
-        mock_config.cogito.get_trainer = "path.to.MockTrainer"
-        mock_build_config_file.return_value = mock_config
-
-        mock_trainer = MockTrainer()
-        mock_instance_class.return_value = mock_trainer
-
-        # Setup exception
-        error_message = "Setup error"
-        mock_trainer.setup.side_effect = Exception(error_message)
-
-        # Execute and verify exception is raised
-        with self.assertRaises(Exception) as context:
-            setup("/path/to/cogito.yaml")
-
-        self.assertIn(error_message, str(context.exception))
 
 
 if __name__ == "__main__":

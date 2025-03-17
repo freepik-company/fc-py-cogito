@@ -8,6 +8,7 @@ from cogito import BasePredictor
 class PredictResponse(BaseModel):
     image: str
     text: str
+    my_custom_variable: str
 
 
 class Predictor(BasePredictor):
@@ -22,9 +23,13 @@ class Predictor(BasePredictor):
         ),
     ) -> PredictResponse:
         return PredictResponse(
-            image="https://example.com/image.jpg", text="Hello world"
+            image="https://example.com/image.jpg",
+            text="Hello world",
+            my_custom_variable=self.my_custom_variable,
         )
 
     def setup(self):
         time.sleep(3)
         logging.info("I'm ready")
+
+        self.my_custom_variable = "Hello"

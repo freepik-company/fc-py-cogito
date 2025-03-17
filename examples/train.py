@@ -4,7 +4,7 @@ from cogito.core.models import BaseTrainer
 
 class Trainer(BaseTrainer):
     def setup(self):
-        pass
+        self.my_custom_variable = "Hello"
 
     def train(
         self,
@@ -15,7 +15,7 @@ class Trainer(BaseTrainer):
     ):
 
         print(
-            f"Training {model_name} for {epochs} epochs with learning rate {learning_rate} and batch size {batch_size}"
+            f"Training {model_name} for {epochs} epochs with learning rate {learning_rate} and batch size {batch_size} (my_custom_variable: {self.my_custom_variable})"
         )
         time.sleep(5)
 
