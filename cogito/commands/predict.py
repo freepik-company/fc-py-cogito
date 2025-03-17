@@ -3,7 +3,7 @@ import json
 import click
 
 from cogito.core.exceptions import ConfigFileNotFoundError
-from cogito.lib.prediction import run, setup
+from cogito.lib.prediction import run
 
 
 @click.command()
@@ -22,8 +22,7 @@ def predict(ctx: click.Context, payload: str) -> None:
         config_path = ctx.get("config_path")
         payload_data = json.loads(payload)
 
-        setup(config_path)
-        result = run(config_path, payload_data)
+        result = run(config_path, payload_data, run_setup=True)
 
         click.echo(result.model_dump_json(indent=4))
     except ConfigFileNotFoundError:
