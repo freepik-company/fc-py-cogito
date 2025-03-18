@@ -2,8 +2,8 @@ import json
 
 import click
 
-from cogito.core.exceptions import ConfigFileNotFoundError
-from cogito.lib.training import run
+from cogito.core.exceptions import ConfigFileNotFoundError, NoSetupMethodError
+from cogito.lib.training import Trainer
 
 
 @click.command()
@@ -16,16 +16,37 @@ def train(ctx: click.Context, payload: str) -> None:
     Example: python -m cogito.cli train --payload '{"key": "value"}'
     """
 
+    # Load config and payload
     try:
         config_path = ctx.get("config_path")
         payload_data = json.loads(payload)
-
-        result = run(config_path, payload_data, run_setup=True)
-
-        click.echo(result)
-    except ConfigFileNotFoundError:
-        click.echo("No configuration file found. Please initialize the project first.")
+    except ConfigFileNotFoundError as e:
+        click.echo(f"Config file not found: {e}", err=True, color=True)
         exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True, color=True)
+        exit(1)
+
+    # Initialize trainer
+    try:
+        trainer = Trainer(config_path)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True, color=True)
+        exit(1)
+
+    # Setup trainer
+    try:
+        trainer.setup()
+    except NoSetupMethodError as e:
+        click.echo(f"Warning: {e}", err=True, color=True)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True, color=True)
+        exit(1)
+
+    # Run trainer
+    try:
+        result = trainer.run(payload_data, run_setup=True)
+        click.echo(result)
     except Exception as e:
         # print stack trace
         # traceback.print_exc()
