@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 # Add the parent directory to sys.path to allow importing cogito modules
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from cogito.lib.training import run
+from cogito.lib.training import Trainer
 from cogito.core.exceptions import ConfigFileNotFoundError
 
 
@@ -41,7 +41,8 @@ class TestTraining(unittest.TestCase):
         payload_data = {"data_path": "/path/to/data", "epochs": 10}
 
         # Execute
-        result = run(config_path, payload_data)
+        trainer = Trainer(config_path)
+        result = trainer.run(payload_data)
 
         # Verify
         # Check that the config was loaded with the correct path
@@ -67,7 +68,7 @@ class TestTraining(unittest.TestCase):
 
         # Execute and verify exception is raised
         with self.assertRaises(ConfigFileNotFoundError):
-            run("/path/to/nonexistent/cogito.yaml", {})
+            trainer = Trainer("/path/to/nonexistent/cogito.yaml")
 
     @patch("cogito.lib.training.build_config_file")
     @patch("cogito.lib.training.instance_class")
@@ -83,7 +84,7 @@ class TestTraining(unittest.TestCase):
 
         # Execute and verify exception is raised
         with self.assertRaises(Exception) as context:
-            run("/path/to/cogito.yaml", {})
+            trainer = Trainer("/path/to/cogito.yaml")
 
         self.assertIn(error_message, str(context.exception))
 
@@ -106,7 +107,8 @@ class TestTraining(unittest.TestCase):
         payload_data = {"data_path": "/path/to/data"}
 
         # Execute
-        run(config_path, payload_data)
+        trainer = Trainer(config_path)
+        trainer.run(payload_data)
 
         # Verify sys.path was modified correctly
         # Instead of patching sys.path.insert, we patch sys.path and check that insert was called

@@ -5,46 +5,54 @@ from cogito.core.utils import (
     instance_class,
     wrap_handler,
 )
+from cogito.core.exceptions import NoSetupMethodError
 
 
-def run(config_path, payload_data, run_setup=True) -> dict:
-    """
-    Predict a model using the payload data
-    """
+# SDK Predictor class
+class Predict:
 
-    config = build_config_file(config_path)
-    predictor_path = config.cogito.get_predictor
-    predictor_instance = instance_class(config.cogito.get_predictor)
+    # Initialize predictor
+    def __init__(self, config_path):
+        # Build config
+        config = build_config_file(config_path)
 
-    # Run setup if needed
-    try:
-        if (
-            hasattr(predictor_instance, "setup")
-            and callable(getattr(predictor_instance, "setup"))
-            and run_setup
-        ):
-            predictor_instance.setup()
-    except Exception as e:
-        raise Exception(f"Error setting up the predictor: {e}")
+        # Get predictor path and instance
+        self.predictor_path = config.cogito.get_predictor
+        self.predictor_instance = instance_class(config.cogito.get_predictor)
 
-    # Create input model from payload
-    _, input_model_class = create_request_model(
-        predictor_path, predictor_instance.predict
-    )
-    input_model = input_model_class(**payload_data)
+        # Create input model from payload
+        _, self.input_model_class = create_request_model(
+            self.predictor_path, self.predictor_instance.predict
+        )
 
-    # Get response model type
-    response_model = get_predictor_handler_return_type(predictor_instance)
+        # Get response model type
+        self.response_model = get_predictor_handler_return_type(self.predictor_instance)
 
-    # Wrap handler with response model
-    handler = wrap_handler(
-        descriptor=predictor_path,
-        original_handler=predictor_instance.predict,
-        response_model=response_model,
-    )
+    # Setup predictor calling setup method in the user's code
+    def setup(self):
+        try:
+            if hasattr(self.predictor_instance, "setup") and callable(
+                getattr(self.predictor_instance, "setup")
+            ):
+                self.predictor_instance.setup()
+            else:
+                raise NoSetupMethodError(self.predictor_instance.__class__.__name__)
+        except Exception as e:
+            raise Exception(f"Error setting up the predictor: {e}")
 
-    # Call handler with input model
-    response = handler(input_model)
+    # Run predictor using the input model in the user's code
+    def run(self, payload_data: dict) -> dict:
+        input_model = self.input_model_class(**payload_data)
 
-    # Print response in JSON format
-    return response
+        # Wrap handler with response model
+        handler = wrap_handler(
+            descriptor=self.predictor_path,
+            original_handler=self.predictor_instance.predict,
+            response_model=self.response_model,
+        )
+
+        # Call handler with input model
+        response = handler(input_model)
+
+        # Print response in JSON format
+        return response

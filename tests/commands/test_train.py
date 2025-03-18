@@ -24,29 +24,34 @@ class TestTrainCommand:
             {"model": "test_model", "data": {"x": [1, 2, 3], "y": [4, 5, 6]}}
         )
 
-    @patch("cogito.commands.train.run")
-    def test_train_success(self, mock_run, runner, mock_context, valid_payload):
+    @patch("cogito.commands.train.Trainer")
+    def test_train_success(
+        self, mock_trainer_class, runner, mock_context, valid_payload
+    ):
         # Arrange
-        mock_run.return_value = "Training completed successfully"
+        mock_trainer_instance = MagicMock()
+        mock_trainer_class.return_value = mock_trainer_instance
+        mock_trainer_instance.run.return_value = "Training completed successfully"
 
         # Act
         result = runner.invoke(train, ["--payload", valid_payload], obj=mock_context)
 
         # Assert
         assert result.exit_code == 0
-        mock_run.assert_called_once_with(
-            "/path/to/cogito.yaml",
+        mock_trainer_class.assert_called_once_with("/path/to/cogito.yaml")
+        mock_trainer_instance.setup.assert_called_once()
+        mock_trainer_instance.run.assert_called_once_with(
             {"model": "test_model", "data": {"x": [1, 2, 3], "y": [4, 5, 6]}},
             run_setup=True,
         )
         assert "Training completed successfully" in result.output
 
-    @patch("cogito.commands.train.run")
+    @patch("cogito.commands.train.Trainer")
     def test_train_config_not_found(
-        self, mock_run, runner, mock_context, valid_payload
+        self, mock_trainer_class, runner, mock_context, valid_payload
     ):
         # Arrange
-        mock_run.side_effect = ConfigFileNotFoundError(
+        mock_trainer_class.side_effect = ConfigFileNotFoundError(
             file_path="/path/to/nonexistent/cogito.yaml"
         )
 
@@ -55,14 +60,14 @@ class TestTrainCommand:
 
         # Assert
         assert result.exit_code == 1
-        assert "No configuration file found" in result.output
+        assert "Config file not found" in result.output
 
-    @patch("cogito.commands.train.run")
+    @patch("cogito.commands.train.Trainer")
     def test_train_general_exception(
-        self, mock_run, runner, mock_context, valid_payload
+        self, mock_trainer_class, runner, mock_context, valid_payload
     ):
         # Arrange
-        mock_run.side_effect = Exception("Test error")
+        mock_trainer_class.side_effect = Exception("Test error")
 
         # Act
         result = runner.invoke(train, ["--payload", valid_payload], obj=mock_context)

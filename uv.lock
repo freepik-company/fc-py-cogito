@@ -193,7 +193,7 @@ wheels = [
 
 [[package]]
 name = "cogito"
-version = "0.3.0a3"
+version = "0.3.0a4"
 source = { editable = "." }
 dependencies = [
     { name = "click" },
