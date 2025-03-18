@@ -27,3 +27,8 @@ class BadRequestError(Exception):
     def __init__(self, message: str):
         super().__init__(message)
         self.message = message
+
+
+class NoSetupMethodError(Exception):
+    def __init__(self, class_name: str):
+        super().__init__(f"No setup method found for {class_name}")
