@@ -55,9 +55,6 @@ code-style-check: ## Checks the code style.
 code-style-dirty: ## Fixes the code style but does not commit the changes
 	@$(ACTIVATE) && black .
 
-code-style: code-style-dirty ## Check the code style and commit the changes
-	@git commit -am "style: fix code style"
-
 pre-commit-install: ## Install pre-commit hooks
 	@pre-commit install --hook-type pre-commit --hook-type pre-push
 
