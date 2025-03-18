@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from cogito.lib.prediction import run
+from cogito.lib.prediction import Predict
 from cogito.core.exceptions import ConfigFileNotFoundError
 
 
@@ -61,7 +61,8 @@ def test_run_successful(
 
     # Call the function
     config_path = "/path/to/cogito.yaml"
-    result = run(config_path, test_payload)
+    predictor = Predict(config_path)
+    result = predictor.run(test_payload)
 
     # Assertions
     mock_build_config_file.assert_called_once_with(config_path)
@@ -84,7 +85,7 @@ def test_run_config_not_found(mock_build_config_file, test_payload):
 
     # Call the function and check for raised exception
     with pytest.raises(ConfigFileNotFoundError):
-        run("/path/to/nonexistent/cogito.yaml", test_payload)
+        predictor = Predict("/path/to/nonexistent/cogito.yaml")
 
 
 @patch("cogito.lib.prediction.build_config_file")
@@ -107,6 +108,6 @@ def test_run_general_exception(
 
     # Call the function and check for raised exception
     with pytest.raises(TestException) as excinfo:
-        run("/path/to/cogito.yaml", test_payload)
+        predictor = Predict("/path/to/cogito.yaml")
 
     assert "Test exception" in str(excinfo.value)
