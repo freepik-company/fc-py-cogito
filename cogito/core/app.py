@@ -12,6 +12,7 @@ from fastapi.exceptions import RequestValidationError
 from cogito.api.handlers import (
     health_check_handler,
     metrics_handler,
+    version_handler,
 )
 from cogito.api.responses import (
     ErrorResponse,
@@ -170,6 +171,15 @@ class Application:
             name="metrics",
             description="Metrics endpoint",
             tags=["metrics"],
+        )
+
+        self.app.add_api_route(
+            "/version",
+            version_handler,
+            methods=["GET"],
+            name="version",
+            description="Version endpoint",
+            tags=["version"],
         )
 
     async def setup(self, app: FastAPI):
