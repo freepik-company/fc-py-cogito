@@ -1,5 +1,13 @@
 # Freepik Company cogito
 
+[![Test](https://github.com/freepik-company/fc-py-cogito/actions/workflows/pr-tests.yaml/badge.svg)](https://github.com/freepik-company/fc-py-cogito/actions/)
+[![Publish](https://github.com/freepik-company/fc-py-cogito/actions/workflows/publish-to-pypi-and-test-pypi.yml/badge.svg)](https://github.com/freepik-company/fc-py-cogito/actions/)
+[![PyPI version](https://img.shields.io/pypi/v/cogito.svg)](https://pypi.org/project/cogito/)
+[![Downloads](https://img.shields.io/pypi/dm/cogito.svg)](https://pypi.org/project/cogito/)
+[![License](https://img.shields.io/github/license/freepik-company/fc-py-cogito)](https://github.com/freepik-company/fc-py-cogito/blob/main/LICENSE)
+[![Contribute](https://img.shields.io/badge/contribute-guidelines-blue)](https://github.com/freepik-company/fc-py-cogito/blob/main/CONTRIBUTING.md)
+
+
 Cogito is a versatile Python framework and SDK aimed at simplifying the development and deployment of inference services. 
 It allows users to wrap machine learning models or any computational logic into APIs effortlessly, while also providing 
 a comprehensive library for programmatic access and a command-line interface for both inference and training operations.
