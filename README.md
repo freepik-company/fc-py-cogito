@@ -533,3 +533,37 @@ For a complete list of available commands, run:
 ```sh
 make help
 ```
+
+### Versioning Strategy
+
+We use [semantic versioning](https://semver.org/) and a milestone-based approach:
+
+#### Alpha and Beta Releases
+
+For feature development and testing, use alpha and beta releases:
+
+```bash
+# Create an alpha release with MINOR version bump
+make alpha BUMP_INCREMENT=MINOR
+
+# Create a beta release with PATCH version bump (default)
+make beta
+
+# Create a beta release with MAJOR version bump
+make beta BUMP_INCREMENT=MAJOR
+```
+
+### Building and Publishing
+
+The CI pipeline handles building and publishing, but you can test locally:
+
+```bash
+# Build the distribution
+make dist
+
+# Upload to TestPyPI (default)
+make upload
+
+# Upload to PyPI
+make upload REPOSITORY=pypi
+```
