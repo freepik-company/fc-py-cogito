@@ -1,4 +1,4 @@
-# Freepik Company cogito
+# Freepik Company Cogito
 
 [![Test](https://github.com/freepik-company/fc-py-cogito/actions/workflows/pr-tests.yaml/badge.svg)](https://github.com/freepik-company/fc-py-cogito/actions/)
 [![Publish](https://github.com/freepik-company/fc-py-cogito/actions/workflows/publish-to-pypi-and-test-pypi.yml/badge.svg)](https://github.com/freepik-company/fc-py-cogito/actions/)
