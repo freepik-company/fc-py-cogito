@@ -94,6 +94,15 @@ alpha: ## Bump the version to alpha (BUMP_INCREMENT=PATCH|MINOR|MAJOR, default: 
 beta: ## Bump the version to beta (BUMP_INCREMENT=PATCH|MINOR|MAJOR, default: PATCH)
 	cz bump --prerelease $@ --increment ${BUMP_INCREMENT};
 
+patch: ## Bump the version to patch
+	cz bump --increment PATCH --changelog;
+
+minor: ## Bump the version to minor
+	cz bump --increment MINOR --changelog;
+
+major: ## Bump the version to major
+	cz bump --increment MAJOR --changelog;
+
 dist: ## Build the distribution
 	@if [ -d "dist" ]; then \
 		echo "WARNING: Clean dist directory first."; \
