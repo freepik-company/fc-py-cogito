@@ -1,3 +1,9 @@
+## 0.3.1 (2025-03-20)
+
+### Feat
+
+- add version bump targets to Makefile
+
 ## 0.3.0 (2025-03-20)
 
 ## 0.3.0a5 (2025-03-18)
