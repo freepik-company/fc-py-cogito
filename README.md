@@ -510,6 +510,9 @@ The project includes various make targets to simplify development workflows:
 - `make upload` - Upload the distribution to the repository (default: testpypi)
 - `make alpha` - Bump the version to alpha
 - `make beta` - Bump the version to beta
+- `make patch` - Bump the version to patch and update changelog
+- `make minor` - Bump the version to minor and update changelog
+- `make major` - Bump the version to major and update changelog
 
 #### Git Workflow
 
