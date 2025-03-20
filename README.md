@@ -30,13 +30,404 @@ Key features include:
 - **Unified Workflow**: Consistent patterns for both development and production environments.
 
 
-## Installation
+## Installation and Getting Started
 
-### Using pip
+### Index
+- [Installation](#installation)
+- [Getting Started](#getting-started)
+  - [Initialize Your Project](#initialize-your-project)
+  - [Developing a Prediction Class](#developing-a-prediction-class)
+  - [Developing a Training Class](#developing-a-training-class-optional)
+- [Using Cogito](#using-cogito)
+  - [Command Line Interface](#using-the-command-line-interface)
+    - [Running Predictions](#running-predictions)
+    - [Running Training](#running-training-optional)
+    - [Launching the RESTful API](#launching-the-restful-api)
+  - [Example Workflow](#example-workflow)
+  - [Containerization](#dockerfile)
+  - [SDK Integration](#integrate-directly-into-your-python-applications)
+
+### Installation
+
+#### Using pip
 You can install the package:
 ```sh
 pip install cogito
 ```
+
+## Getting Started
+
+### Initialize Your Project
+
+Start by initializing a new Cogito project in your directory:
+
+```bash
+# Interactive initialization with prompts
+cogito-cli init
+
+# Initialize with default values
+cogito-cli init --default
+
+# Initialize and scaffold prediction classes
+cogito-cli init --scaffold
+```
+
+This will create a `cogito.yaml` configuration file in your directory with the necessary settings to get started.
+
+### Developing a Prediction Class
+
+Create a prediction class by extending `BasePredictor`. Here's a basic example:
+
+```python
+from pydantic import BaseModel, Field
+from cogito import BasePredictor
+
+class PredictResponse(BaseModel):
+    result: str
+    score: float
+
+class Predictor(BasePredictor):
+    def setup(self):
+        # Initialize your model and resources here
+        self.model = None  # Your model initialization
+        print("Model loaded and ready!")
+    
+    def predict(
+        self,
+        input_text: str,
+        threshold: float = Field(0.5, gt=0.0, lt=1.0),
+    ) -> PredictResponse:
+        # Your prediction logic here
+        return PredictResponse(
+            result="Prediction result",
+            score=0.95
+        )
+```
+
+Save this file in your project directory according to the path specified in your `cogito.yaml` file.
+
+### Developing a Training Class (Optional)
+
+For model training capabilities, extend the `BaseTrainer` class:
+
+```python
+from cogito.core.models import BaseTrainer
+
+class Trainer(BaseTrainer):
+    def setup(self):
+        # Initialize training resources
+        self.training_config = {}
+    
+    def train(
+        self,
+        dataset_path: str,
+        epochs: int = 10,
+        learning_rate: float = 0.001,
+        batch_size: int = 32
+    ):
+        # Your training logic here
+        print(f"Training model with {epochs} epochs")
+        
+        # Return training results or metrics
+        return {
+            "status": "success",
+            "accuracy": 0.92,
+            "loss": 0.08
+        }
+```
+
+### Using the Command Line Interface
+
+#### Running Predictions
+
+Once your prediction class is set up, you can use the CLI to run predictions:
+
+```bash
+# Run a prediction with a JSON payload
+cogito-cli predict --payload '{"input_text": "sample text", "threshold": 0.7}'
+
+# Using a payload from a file
+cogito-cli predict --payload "$(cat input_data.json)"
+```
+
+#### Running Training (Optional)
+
+If you've implemented a training class:
+
+```bash
+# Run training with a JSON payload
+cogito-cli train --payload '{"dataset_path": "data/training.csv", "epochs": 20, "learning_rate": 0.001}'
+
+# Using a payload from a file
+cogito-cli train --payload "$(cat training_config.json)"
+```
+
+#### Launching the RESTful API
+
+To deploy your model as a RESTful API service:
+
+```bash
+# Start the API server using configuration in the current directory
+cogito-cli run
+
+# Start the API server with a specific configuration file
+cogito-cli -c ./my-project/cogito.yaml run
+```
+
+By default, this will start a server on localhost that exposes your prediction functionality as API endpoints. You can then send HTTP requests to interact with your model.
+
+### Example Workflow
+
+1. Initialize a new project:
+   ```bash
+   mkdir my-inference-service
+   cd my-inference-service
+   cogito-cli init --scaffold
+   ```
+
+2. Implement your prediction and/or training logic in the scaffolded files
+
+3. Test your implementation using the CLI:
+   ```bash
+   cogito-cli predict --payload '{"input_text": "test"}'
+   ```
+
+4. Run as an API:
+   ```bash
+   cogito-cli run
+   ```
+
+5. Send requests to your API:
+   ```bash
+   curl -X POST http://localhost:8000/predict \
+     -H "Content-Type: application/json" \
+     -d '{"input_text": "test", "threshold": 0.7}'
+   ```
+
+### Dockerfile
+
+To deploy your Cogito application in a containerized environment, you can use the following Dockerfile example:
+
+```dockerfile
+# Use an official Python runtime as a parent image
+FROM python:3.10-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies if needed
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy only requirements first to leverage Docker cache
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install cogito
+RUN pip install --no-cache-dir cogito
+
+# Copy the current directory contents into the container
+COPY . .
+
+# Make port 8000 available to the world outside this container
+EXPOSE 8000
+
+# Define environment variables if needed
+ENV MODEL_PATH=/app/models/model.pkl
+ENV LOG_LEVEL=INFO
+
+# Run the Cogito application when the container launches
+CMD ["cogito-cli", "run"]
+```
+
+#### Building and Running the Docker Container
+
+1. Build the Docker image:
+   ```bash
+   docker build -t my-cogito-app .
+   ```
+
+2. Run the container:
+   ```bash
+   docker run -p 8000:8000 my-cogito-app
+   ```
+
+3. For production deployments, you might want to add health checks and configure environment variables:
+   ```bash
+   docker run -p 8000:8000 \
+     -e MODEL_PATH=/app/models/custom_model.pkl \
+     -e LOG_LEVEL=WARNING \
+     --health-cmd="curl -f http://localhost:8000/health || exit 1" \
+     --health-interval=30s \
+     my-cogito-app
+   ```
+
+#### Docker Compose Example
+
+For more complex setups, you can use Docker Compose:
+
+```yaml
+version: '3.8'
+
+services:
+  cogito-app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models
+    environment:
+      - MODEL_PATH=/app/models/model.pkl
+      - LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+```
+
+Run with:
+```bash
+docker-compose up -d
+```
+
+This containerization approach ensures your Cogito application is deployable in any environment that supports Docker, from local development to cloud platforms.
+
+### Integrate Directly into Your Python Applications
+
+In addition to using Cogito as a CLI tool or API service, you can integrate it directly into your Python applications using the SDK interface. This allows you to leverage your Cogito models programmatically without the overhead of HTTP requests.
+
+#### Basic SDK Usage
+
+```python
+from cogito.lib.prediction import Predict
+import json
+
+# Initialize the predictor with your configuration
+predictor = Predict("./cogito.yaml")
+
+# Setup the predictor (loads models, etc.)
+predictor.setup()
+
+# Create a payload
+payload = {
+    "input_text": "This is a sample text to analyze",
+    "threshold": 0.7
+}
+
+# Run prediction
+result = predictor.run(payload)
+
+# Process the result
+print(json.dumps(result, indent=2))
+```
+
+#### Training with the SDK
+
+If you've implemented a training class, you can use it programmatically as well:
+
+```python
+from cogito.lib.training import Trainer
+
+# Initialize the trainer with your configuration
+trainer = Trainer("./cogito.yaml")
+
+# Setup the trainer
+trainer.setup()
+
+# Create training parameters
+training_params = {
+    "dataset_path": "data/training.csv",
+    "epochs": 20,
+    "learning_rate": 0.001,
+    "batch_size": 32
+}
+
+# Run training
+result = trainer.run(training_params)
+
+# Process the training result
+print(f"Training completed with results: {result}")
+```
+
+#### Integration Example: Web Application
+
+Here's how you might integrate Cogito into a Flask application:
+
+```python
+from flask import Flask, request, jsonify
+from cogito.lib.prediction import Predict
+
+app = Flask(__name__)
+
+# Initialize predictor at startup
+predictor = Predict("./cogito.yaml")
+predictor.setup()
+
+@app.route('/analyze', methods=['POST'])
+def analyze():
+    data = request.json
+    
+    try:
+        # Use the Cogito predictor
+        result = predictor.run(data)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 400
+
+if __name__ == '__main__':
+    app.run(debug=True)
+```
+
+#### Batch Processing Example
+
+For processing multiple items efficiently:
+
+```python
+from cogito.lib.prediction import Predict
+import pandas as pd
+from tqdm import tqdm
+
+# Initialize predictor
+predictor = Predict("./cogito.yaml")
+predictor.setup()
+
+# Load data for batch processing
+df = pd.read_csv("input_data.csv")
+
+# Process each row
+results = []
+for _, row in tqdm(df.iterrows(), total=len(df)):
+    payload = {
+        "input_text": row['text'],
+        "threshold": 0.5
+    }
+    
+    # Run prediction and store result
+    result = predictor.run(payload)
+    results.append(result)
+
+# Create a results dataframe
+results_df = pd.DataFrame(results)
+results_df.to_csv("prediction_results.csv", index=False)
+```
+
+#### Checking Version
+
+You can also check the installed Cogito version programmatically:
+
+```python
+from cogito.lib.version import get_version
+
+print(f"Using Cogito version: {get_version()}")
+```
+
+By using the SDK interface, you can seamlessly integrate your Cogito models into larger applications, batch processing workflows, or custom environments where a direct API call might not be optimal.
+
 ---
 
 ## Usage Guide: Cogito CLI
