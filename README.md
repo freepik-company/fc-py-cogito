@@ -29,6 +29,11 @@ Key features include:
 - **Training Integration**: Run and manage training processes directly through the command line.
 - **Unified Workflow**: Consistent patterns for both development and production environments.
 
+## Index
+
+- [Installation and Getting Started](#installation-and-getting-started)
+- [CLI Reference](#cli-reference)
+- [Development](#development)
 
 ## Installation and Getting Started
 
@@ -434,7 +439,7 @@ By using the SDK interface, you can seamlessly integrate your Cogito models into
 
 The **Cogito CLI** provides several commands to initialize, scaffold, and run your inference-based projects.
 
-# CLI Reference
+## CLI Reference
 
 - [Global Options](#global-options)
 - [Commands](#commands)
@@ -448,7 +453,7 @@ The **Cogito CLI** provides several commands to initialize, scaffold, and run yo
   - [Help](#help)
 ---
 
-## Global Options
+### Global Options
 
 These options can be used with any command:
 
