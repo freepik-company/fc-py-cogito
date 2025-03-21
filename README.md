@@ -34,6 +34,7 @@ Key features include:
 - [Installation and Getting Started](#installation-and-getting-started)
 - [CLI Reference](#cli-reference)
 - [Development](#development)
+- [Standard API Endpoints](#standard-api-endpoints)
 
 ## Installation and Getting Started
 
@@ -974,3 +975,115 @@ make upload
 # Upload to PyPI
 make upload REPOSITORY=pypi
 ```
+
+### Standard API Endpoints
+
+When you deploy a Cogito application as a RESTful API, several standard endpoints are automatically included, regardless of your custom prediction endpoints:
+
+#### Health Check Endpoint
+
+- **URL**: `/health`
+- **Method**: `GET`
+- **Description**: Provides a simple health check mechanism to verify that the service is up and running.
+- **Response**: 
+  ```json
+  {
+    "status": "OK"
+  }
+  ```
+- **Usage**: Commonly used by container orchestration systems (like Kubernetes) for liveness and readiness probes.
+
+##### Kubernetes Integration
+
+The health endpoint can be used to configure Kubernetes probes for proper container lifecycle management:
+
+1. **Liveness Probe**: Determines if the application is running properly. If it fails, Kubernetes will restart the container.
+
+   a) **HTTP Endpoint Method**: Uses the `/health` endpoint which checks the `readiness_file` internally:
+
+   ```yaml
+   livenessProbe:
+   httpGet:
+      path: /health
+      port: 8000
+   initialDelaySeconds: 30
+   periodSeconds: 10
+   timeoutSeconds: 5
+   failureThreshold: 3
+   ```
+
+   b) **File Existence Method**: Checks for the existence of the `readiness_file` directly:
+
+   ```yaml
+   livenessProbe:
+     exec:
+       command:
+       - test
+       - -f
+       - /tmp/cogito-readiness.lock  # Must match readiness_file in cogito.yaml
+     initialDelaySeconds: 5
+     periodSeconds: 5
+   ```
+
+2. **Readiness Probe**: Determines if the container is ready to receive traffic. There are two approaches you can use:
+
+   a) **HTTP Endpoint Method**: Uses the `/health` endpoint which checks the `readiness_file` internally:
+
+   ```yaml
+   readinessProbe:
+     httpGet:
+       path: /health
+       port: 8000
+     initialDelaySeconds: 5
+     periodSeconds: 5
+   ```
+
+   b) **File Existence Method**: Checks for the existence of the `readiness_file` directly:
+
+   ```yaml
+   readinessProbe:
+     exec:
+       command:
+       - test
+       - -f
+       - /tmp/cogito-readiness.lock  # Must match readiness_file in cogito.yaml
+     initialDelaySeconds: 5
+     periodSeconds: 5
+   ```
+
+##### Using the Readiness File
+
+The `readiness_file` parameter in your `cogito.yaml` (e.g., `/tmp/cogito-readiness.lock`) provides an additional mechanism to control when your service is considered ready:
+
+**How it works**: 
+   - When your Cogito application starts, it checks if this file exists
+   - If the file exists, the health endpoint returns a 200 OK response
+   - If the file doesn't exist, it returns a 503 Service Unavailable response
+   - Kubernetes can check this file directly or through the health endpoint
+
+**Choosing between methods**:
+   - **HTTP endpoint method**: Provides more information (status codes, potential error messages) and follows standard HTTP patterns
+   - **File existence method**: Slightly more efficient as it doesn't require an HTTP call and works even if the application is temporarily unable to respond to HTTP requests
+
+This approach ensures that traffic is only directed to your service when it's fully ready to handle requests, preventing errors during startup or maintenance periods.
+
+#### Metrics Endpoint
+
+- **URL**: `/metrics`
+- **Method**: `GET`
+- **Description**: Exposes Prometheus-compatible metrics about the service's performance and usage.
+- **Response**: Plain text in Prometheus exposition format
+- **Usage**: Can be scraped by Prometheus to monitor application metrics like request count, latency, and resource usage.
+
+#### Version Endpoint
+
+- **URL**: `/version`
+- **Method**: `GET`
+- **Description**: Returns the current version of the deployed Cogito application.
+- **Response**:
+  ```json
+  {
+    "version": "1.2.3"
+  }
+  ```
+- **Usage**: Helpful for verifying which version is currently deployed, especially in multi-environment setups.
