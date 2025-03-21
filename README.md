@@ -35,6 +35,7 @@ Key features include:
 - [CLI Reference](#cli-reference)
 - [Development](#development)
 - [Standard API Endpoints](#standard-api-endpoints)
+- [SDK API Reference](#sdk-api-reference)
 
 ## Installation and Getting Started
 
@@ -1094,3 +1095,164 @@ This approach ensures that traffic is only directed to your service when it's fu
   }
   ```
 - **Usage**: Helpful for verifying which version is currently deployed, especially in multi-environment setups.
+
+## SDK API Reference
+
+This section documents the core classes and methods available in the Cogito SDK for programmatic integration.
+
+### Index
+- [Prediction Module](#prediction-module)
+  - [Predict Class](#predict-class)
+- [Training Module](#training-module)
+  - [Trainer Class](#trainer-class)
+- [Version Module](#version-module)
+  - [get_version Function](#get_version-function)
+
+### Prediction Module
+
+The prediction module (`cogito.lib.prediction`) provides functionality for making predictions using your Cogito models programmatically.
+
+#### Predict Class
+
+The `Predict` class is the main interface for making predictions with your models.
+
+**Import**:
+```python
+from cogito.lib.prediction import Predict
+```
+
+**Constructor**:
+```python
+Predict(config_path: str)
+```
+- `config_path`: Path to the cogito.yaml configuration file
+
+**Methods**:
+
+- `setup()` → `None`
+  - Initializes the predictor by calling the setup method of your predictor class
+  - This method should be called before making predictions
+  - Raises: `NoSetupMethodError` if the predictor class doesn't implement a setup method
+  - Raises: `Exception` if any error occurs during setup
+
+- `run(payload_data: dict)` → `dict`
+  - Executes a prediction using the provided payload data
+  - Parameters:
+    - `payload_data`: A dictionary containing the input data for prediction, matching the parameters of your `predict()` method
+  - Returns: A dictionary containing the prediction results
+  - Raises: `Exception` if any error occurs during prediction
+
+**Example Usage**:
+```python
+from cogito.lib.prediction import Predict
+import json
+
+# Initialize predictor with configuration file
+predictor = Predict("./cogito.yaml")
+
+# Set up the predictor (load models, etc.)
+predictor.setup()
+
+# Prepare input data
+data = {
+    "input_text": "Sample text for prediction",
+    "threshold": 0.7
+}
+
+# Run prediction
+try:
+    result = predictor.run(data)
+    print(json.dumps(result, indent=2))
+except Exception as e:
+    print(f"Prediction failed: {e}")
+```
+
+### Training Module
+
+The training module (`cogito.lib.training`) provides functionality for training models using your Cogito trainers programmatically.
+
+#### Trainer Class
+
+The `Trainer` class is the main interface for training models.
+
+**Import**:
+```python
+from cogito.lib.training import Trainer
+```
+
+**Constructor**:
+```python
+Trainer(config_path: str)
+```
+- `config_path`: Path to the cogito.yaml configuration file
+
+**Methods**:
+
+- `setup()` → `None`
+  - Initializes the trainer by calling the setup method of your trainer class
+  - This method should be called before training
+  - Raises: `NoSetupMethodError` if the trainer class doesn't implement a setup method
+  - Raises: `Exception` if any error occurs during setup
+
+- `run(payload_data: dict, run_setup: bool = True)` → `dict`
+  - Executes the training process using the provided payload data
+  - Parameters:
+    - `payload_data`: A dictionary containing the training parameters, matching the parameters of your `train()` method
+    - `run_setup`: Boolean flag indicating whether to run setup automatically (default: True)
+  - Returns: A dictionary containing the training results or metrics
+  - Raises: `Exception` if any error occurs during training
+
+**Example Usage**:
+```python
+from cogito.lib.training import Trainer
+
+# Initialize trainer with configuration file
+trainer = Trainer("./cogito.yaml")
+
+# Set up the trainer (initialize resources)
+trainer.setup()
+
+# Prepare training parameters
+training_params = {
+    "dataset_path": "data/training_data.csv",
+    "epochs": 20,
+    "learning_rate": 0.001,
+    "batch_size": 64
+}
+
+# Run training
+try:
+    result = trainer.run(training_params)
+    print(f"Training completed with metrics: {result}")
+except Exception as e:
+    print(f"Training failed: {e}")
+```
+
+### Version Module
+
+The version module (`cogito.lib.version`) provides functionality for retrieving the current version of Cogito.
+
+#### get_version Function
+
+The `get_version` function returns the current version of the Cogito package.
+
+**Import**:
+```python
+from cogito.lib.version import get_version
+```
+
+**Signature**:
+```python
+get_version() -> str
+```
+- Returns: A string containing the current version of Cogito
+
+**Example Usage**:
+```python
+from cogito.lib.version import get_version
+
+version = get_version()
+print(f"Using Cogito version: {version}")
+```
+
+This allows you to programmatically check which version of Cogito is being used in your application, which can be helpful for debugging or ensuring compatibility.
