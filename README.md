@@ -980,6 +980,13 @@ make upload REPOSITORY=pypi
 
 When you deploy a Cogito application as a RESTful API, several standard endpoints are automatically included, regardless of your custom prediction endpoints:
 
+#### Index
+- [Health Check Endpoint](#health-check-endpoint)
+  - [Kubernetes Integration](#kubernetes-integration)
+  - [Using the Readiness File](#using-the-readiness-file)
+- [Metrics Endpoint](#metrics-endpoint)
+- [Version Endpoint](#version-endpoint)
+
 #### Health Check Endpoint
 
 - **URL**: `/health`
