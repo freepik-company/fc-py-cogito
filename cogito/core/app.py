@@ -208,6 +208,15 @@ class Application:
             host=self.config.cogito.get_fastapi_host,
             port=self.config.cogito.get_fastapi_port,
         )
+    
+    def dev(self, host: str, port: int):
+        uvicorn.run(
+            "cogito.core.app.Application",
+            host=host,
+            port=port,
+            reload=True,
+            reload_dirs=["cogito-sandbox"],
+        )
 
     @classmethod
     def _get_default_logger(cls):
