@@ -266,7 +266,7 @@ CMD ["cogito-cli", "run"]
    docker run -p 8000:8000 \
      -e MODEL_PATH=/app/models/custom_model.pkl \
      -e LOG_LEVEL=WARNING \
-     --health-cmd="curl -f http://localhost:8000/health || exit 1" \
+     --health-cmd="curl -f http://localhost:8000/health-check || exit 1" \
      --health-interval=30s \
      my-cogito-app
    ```
@@ -290,7 +290,7 @@ services:
       - LOG_LEVEL=INFO
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health-check"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -990,7 +990,7 @@ When you deploy a Cogito application as a RESTful API, several standard endpoint
 
 #### Health Check Endpoint
 
-- **URL**: `/health`
+- **URL**: `/health-check`
 - **Method**: `GET`
 - **Description**: Provides a simple health check mechanism to verify that the service is up and running.
 - **Response**: 
@@ -1007,12 +1007,12 @@ The health endpoint can be used to configure Kubernetes probes for proper contai
 
 1. **Liveness Probe**: Determines if the application is running properly. If it fails, Kubernetes will restart the container.
 
-   a) **HTTP Endpoint Method**: Uses the `/health` endpoint which checks the `readiness_file` internally:
+   a) **HTTP Endpoint Method**: Uses the `/health-check` endpoint which checks the `readiness_file` internally:
 
    ```yaml
    livenessProbe:
    httpGet:
-      path: /health
+      path: /health-check
       port: 8000
    initialDelaySeconds: 30
    periodSeconds: 10
@@ -1035,12 +1035,12 @@ The health endpoint can be used to configure Kubernetes probes for proper contai
 
 2. **Readiness Probe**: Determines if the container is ready to receive traffic. There are two approaches you can use:
 
-   a) **HTTP Endpoint Method**: Uses the `/health` endpoint which checks the `readiness_file` internally:
+   a) **HTTP Endpoint Method**: Uses the `/health-check` endpoint which checks the `readiness_file` internally:
 
    ```yaml
    readinessProbe:
      httpGet:
-       path: /health
+       path: /health-check
        port: 8000
      initialDelaySeconds: 5
      periodSeconds: 5
