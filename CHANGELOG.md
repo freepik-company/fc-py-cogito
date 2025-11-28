@@ -1,3 +1,13 @@
+## 0.4.0a0 (2025-11-28)
+
+### Feat
+
+- **wrap_handler**: pass config to wrap handler and omit 'input' if configured
+
+### Refactor
+
+- **ResultResponse**: made 'input' response field optional
+
 ## 0.3.1 (2025-03-20)
 
 ### Feat
