@@ -17,6 +17,7 @@ class ServerConfig(BaseModel):
     route: Optional[RouteConfig]
     threads: Optional[int] = 1
     readiness_file: str = "$HOME/readiness.lock"
+    return_input_on_response: Optional[bool] = True
 
     @classmethod
     def default(cls):
@@ -29,4 +30,5 @@ class ServerConfig(BaseModel):
             route=RouteConfig.default(),
             threads=1,
             readiness_file="$HOME/readiness.lock",
+            return_input_on_response=True,
         )

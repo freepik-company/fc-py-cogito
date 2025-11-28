@@ -23,4 +23,5 @@ class ServerConfig(v0):
             cache_dir=config.cache_dir,
             threads=config.threads,
             readiness_file=config.readiness_file,
+            return_input_on_response=config.return_input_on_response,
         )
