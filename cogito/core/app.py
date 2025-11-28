@@ -129,6 +129,7 @@ class Application:
             ),
             semaphore=semaphores[predictor_string],
             response_model=response_model,
+            config=self.config,
         )
 
         self.app.add_api_route(
