@@ -4,10 +4,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 
-class ResultResponse(BaseModel):
-    class Config:
-        exclude_none = True
-    
+class ResultResponse(BaseModel):    
     inference_time_seconds: float
     input: Optional[dict[str, Any]] = None
     result: Any

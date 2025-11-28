@@ -93,11 +93,7 @@ def wrap_handler(
 ) -> Callable:
     class_name, input_model = create_request_model(descriptor, original_handler)
 
-    return_input = True
-    if config and hasattr(config, 'cogito') and hasattr(config.cogito, 'server') and hasattr(config.cogito.server, 'return_input_on_response'):
-        value = config.cogito.server.return_input_on_response
-        if isinstance(value, bool):
-            return_input = value
+    return_input = config.get_cogito_param('server.return_input_on_response') if config else True
 
     # Check if the original handler is an async function
     # Fixme Unify handler after replacing status checking model with file based mode.
