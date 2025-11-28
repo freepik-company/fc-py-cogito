@@ -1,12 +1,14 @@
-from typing import Any
+from typing import Any, Optional
 
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 
 class ResultResponse(BaseModel):
+    model_config = {"exclude_none": True}
+    
     inference_time_seconds: float
-    input: dict[str, Any]
+    input: Optional[dict[str, Any]] = None
     result: Any
 
 
