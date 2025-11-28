@@ -3,6 +3,7 @@ cogito:
   server:
     cache_dir: /tmp/cogito
     description: Inference server
+    return_input_on_response: true
     fastapi:
       access_log: true
       debug: false
