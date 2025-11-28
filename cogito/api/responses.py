@@ -5,7 +5,8 @@ from pydantic import BaseModel
 
 
 class ResultResponse(BaseModel):
-    model_config = {"exclude_none": True}
+    class Config:
+        exclude_none = True
     
     inference_time_seconds: float
     input: Optional[dict[str, Any]] = None
