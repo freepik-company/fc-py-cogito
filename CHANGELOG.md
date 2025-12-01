@@ -1,3 +1,9 @@
+## 0.4.0 (2025-12-01)
+
+### Feat
+
+- add not return input on response option (#126)
+
 ## 0.4.0a0 (2025-11-28)
 
 ### Feat
