@@ -89,8 +89,11 @@ def wrap_handler(
     original_handler: Callable,
     response_model: ResultResponse,
     semaphore: asyncio.Semaphore = None,
+    config: ConfigFile = None,
 ) -> Callable:
     class_name, input_model = create_request_model(descriptor, original_handler)
+
+    return_input = config.get_cogito_param('server.return_input_on_response') if config else True
 
     # Check if the original handler is an async function
     # Fixme Unify handler after replacing status checking model with file based mode.
@@ -121,7 +124,7 @@ def wrap_handler(
 
                 return response_model(
                     inference_time_seconds=end_time,
-                    input=dict_input,
+                    input=dict_input if return_input else None,
                     result=result,
                 )
 
@@ -162,7 +165,7 @@ def wrap_handler(
 
                 return response_model(
                     inference_time_seconds=end_time,
-                    input=dict_input,
+                    input=dict_input if return_input else None,
                     result=result,
                 )
 

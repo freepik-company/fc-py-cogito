@@ -2,7 +2,7 @@ import importlib
 import os
 from pathlib import Path
 import sys
-from typing import Dict, Optional, Type
+from typing import Any, Dict, Optional, Type
 
 import yaml
 from pydantic import BaseModel
@@ -119,6 +119,15 @@ class ConfigFile(BaseModel):
         self.config_version = DEFAULT_CONFIG_VERSION
 
         return self
+
+    def get_cogito_param(self, param_name: str) -> Any:
+        param_parts = param_name.split('.')
+        current = self.cogito
+        for part in param_parts:
+            if not hasattr(current, part):
+                return None
+            current = getattr(current, part)
+        return current
 
 
 def build_config_file(config_path: str) -> ConfigFile:
