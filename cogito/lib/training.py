@@ -26,7 +26,7 @@ class Trainer:
             else:
                 raise NoSetupMethodError(self.trainer.__class__.__name__)
         except Exception as e:
-            raise Exception(f"Error setting up the trainer: {e}")
+            raise Exception(f"Error setting up the trainer: {e}") from e
 
     # Run training calling train method in the user's code
     def run(self, payload_data, run_setup=True):
@@ -34,6 +34,6 @@ class Trainer:
         try:
             result = self.trainer.train(**payload_data)
         except Exception as e:
-            raise Exception(f"Error training the model: {e}")
+            raise Exception(f"Error training the model: {e}") from e
 
         return result

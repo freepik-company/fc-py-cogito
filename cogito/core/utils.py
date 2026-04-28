@@ -5,6 +5,7 @@ import inspect
 import logging
 import os
 import time
+import traceback
 from inspect import Parameter, signature
 from typing import Any, Callable, Dict, get_type_hints
 
@@ -120,7 +121,10 @@ def wrap_handler(
                 except Exception as e:
                     logging.exception(e)
                     # todo Count failed requests
-                    return ErrorResponse(message=str(e)).to_json_response()
+                    return ErrorResponse(
+                        message=str(e),
+                        traceback=traceback.format_exc(),
+                    ).to_json_response()
 
                 return response_model(
                     inference_time_seconds=end_time,
@@ -161,7 +165,10 @@ def wrap_handler(
                 except Exception as e:
                     logging.exception(e)
                     # todo Count failed requests
-                    return ErrorResponse(message=str(e)).to_json_response()
+                    return ErrorResponse(
+                        message=str(e),
+                        traceback=traceback.format_exc(),
+                    ).to_json_response()
 
                 return response_model(
                     inference_time_seconds=end_time,

@@ -90,6 +90,34 @@ class TestTraining(unittest.TestCase):
 
     @patch("cogito.lib.training.build_config_file")
     @patch("cogito.lib.training.instance_class")
+    def test_run_train_failure_preserves_traceback(
+        self, mock_instance_class, mock_build_config_file
+    ):
+        # Setup
+        mock_config = MagicMock()
+        mock_config.cogito.get_trainer = "path.to.MockTrainer"
+        mock_build_config_file.return_value = mock_config
+
+        class FailingTrainer:
+            def setup(self):
+                pass
+
+            def train(self, **kwargs):
+                raise RuntimeError("third party failure")
+
+        mock_instance_class.return_value = FailingTrainer()
+
+        trainer = Trainer("/path/to/cogito.yaml")
+
+        with self.assertRaises(Exception) as context:
+            trainer.run({"data_path": "/x"})
+
+        # The wrapper exception keeps the original cause via `from e`
+        self.assertIsInstance(context.exception.__cause__, RuntimeError)
+        self.assertEqual(str(context.exception.__cause__), "third party failure")
+
+    @patch("cogito.lib.training.build_config_file")
+    @patch("cogito.lib.training.instance_class")
     @patch("sys.path")
     def test_run_with_app_dir_in_path(
         self, mock_sys_path, mock_instance_class, mock_build_config_file

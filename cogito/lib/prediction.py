@@ -38,7 +38,7 @@ class Predict:
             else:
                 raise NoSetupMethodError(self.predictor_instance.__class__.__name__)
         except Exception as e:
-            raise Exception(f"Error setting up the predictor: {e}")
+            raise Exception(f"Error setting up the predictor: {e}") from e
 
     # Run predictor using the input model in the user's code
     def run(self, payload_data: dict) -> dict:
