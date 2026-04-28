@@ -18,6 +18,7 @@ class ServerConfig(BaseModel):
     threads: Optional[int] = 1
     readiness_file: str = "$HOME/readiness.lock"
     return_input_on_response: Optional[bool] = True
+    return_traceback_on_response: Optional[bool] = False
 
     @classmethod
     def default(cls):
@@ -31,4 +32,5 @@ class ServerConfig(BaseModel):
             threads=1,
             readiness_file="$HOME/readiness.lock",
             return_input_on_response=True,
+            return_traceback_on_response=False,
         )

@@ -15,7 +15,9 @@ class ErrorResponse(BaseModel):
     traceback: Optional[str] = None
 
     def to_json_response(self) -> JSONResponse:
-        return JSONResponse(status_code=500, content=self.model_dump())
+        return JSONResponse(
+            status_code=500, content=self.model_dump(exclude_none=True)
+        )
 
 
 class BadRequestResponse(BaseModel):

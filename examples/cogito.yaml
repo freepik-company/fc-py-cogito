@@ -4,6 +4,7 @@ cogito:
     cache_dir: /tmp/cogito
     description: Inference server
     return_input_on_response: false
+    return_traceback_on_response: false
     fastapi:
       access_log: true
       debug: false

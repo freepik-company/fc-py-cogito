@@ -95,6 +95,9 @@ def wrap_handler(
     class_name, input_model = create_request_model(descriptor, original_handler)
 
     return_input = config.get_cogito_param('server.return_input_on_response') if config else True
+    return_traceback = (
+        config.get_cogito_param('server.return_traceback_on_response') if config else False
+    )
 
     # Check if the original handler is an async function
     # Fixme Unify handler after replacing status checking model with file based mode.
@@ -119,11 +122,11 @@ def wrap_handler(
                 except BadRequestError as e:
                     raise
                 except Exception as e:
-                    logging.exception(e)
+                    logging.exception("predictor handler invocation failed")
                     # todo Count failed requests
                     return ErrorResponse(
                         message=str(e),
-                        traceback=traceback.format_exc(),
+                        traceback=traceback.format_exc() if return_traceback else None,
                     ).to_json_response()
 
                 return response_model(
@@ -163,11 +166,11 @@ def wrap_handler(
                 except BadRequestError as e:
                     raise
                 except Exception as e:
-                    logging.exception(e)
+                    logging.exception("predictor handler invocation failed")
                     # todo Count failed requests
                     return ErrorResponse(
                         message=str(e),
-                        traceback=traceback.format_exc(),
+                        traceback=traceback.format_exc() if return_traceback else None,
                     ).to_json_response()
 
                 return response_model(
