@@ -24,4 +24,5 @@ class ServerConfig(v0):
             threads=config.threads,
             readiness_file=config.readiness_file,
             return_input_on_response=config.return_input_on_response,
+            return_traceback_on_response=config.return_traceback_on_response,
         )

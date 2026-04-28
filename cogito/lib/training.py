@@ -1,6 +1,10 @@
 from cogito.core.config.file import build_config_file
 from cogito.core.utils import instance_class
-from cogito.core.exceptions import NoSetupMethodError
+from cogito.core.exceptions import (
+    NoSetupMethodError,
+    TrainerRunError,
+    TrainerSetupError,
+)
 
 
 # SDK Trainer class
@@ -26,7 +30,7 @@ class Trainer:
             else:
                 raise NoSetupMethodError(self.trainer.__class__.__name__)
         except Exception as e:
-            raise Exception(f"Error setting up the trainer: {e}")
+            raise TrainerSetupError(e) from e
 
     # Run training calling train method in the user's code
     def run(self, payload_data, run_setup=True):
@@ -34,6 +38,6 @@ class Trainer:
         try:
             result = self.trainer.train(**payload_data)
         except Exception as e:
-            raise Exception(f"Error training the model: {e}")
+            raise TrainerRunError(e) from e
 
         return result

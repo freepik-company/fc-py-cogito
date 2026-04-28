@@ -78,6 +78,7 @@ class Application:
                 self._logger.critical(
                     "Unable to start application",
                     extra={"error": e},
+                    exc_info=True,
                 )
                 sys.exit(1)
 
@@ -200,8 +201,9 @@ class Application:
                 self._logger.critical(
                     "Unable to setting up predictor",
                     extra={"predictor": predictor.__class__.__name__, "error": e},
+                    exc_info=True,
                 )
-                raise SetupError(predictor.__class__.__name__, e)
+                raise SetupError(predictor.__class__.__name__, e) from e
 
     def run(self):
         uvicorn.run(

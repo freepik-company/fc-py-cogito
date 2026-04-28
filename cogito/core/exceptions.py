@@ -32,3 +32,18 @@ class BadRequestError(Exception):
 class NoSetupMethodError(Exception):
     def __init__(self, class_name: str):
         super().__init__(f"No setup method found for {class_name}")
+
+
+class PredictorSetupError(Exception):
+    def __init__(self, error: Exception):
+        super().__init__(f"Error setting up the predictor: {error}")
+
+
+class TrainerSetupError(Exception):
+    def __init__(self, error: Exception):
+        super().__init__(f"Error setting up the trainer: {error}")
+
+
+class TrainerRunError(Exception):
+    def __init__(self, error: Exception):
+        super().__init__(f"Error training the model: {error}")
