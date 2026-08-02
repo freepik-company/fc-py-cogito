@@ -851,6 +851,7 @@ cogito-cli [COMMAND] --help
 **Behavior:**
 - Displays a list of available commands when used without arguments
 - Shows detailed help information for a specific command when used with a command name
+- Shows applicable global options, such as `-c, --config-path`, in command help
 - Includes information about available options, arguments, and basic usage examples
 - Can be used with any command or subcommand to get context-specific help
 

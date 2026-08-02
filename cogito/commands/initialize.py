@@ -1,5 +1,6 @@
 import click
 
+from cogito.commands._help import RootOptionsCommand
 from cogito.commands.scaffold import scaffold_predict_classes
 from cogito.core.config.file import ConfigFile
 
@@ -110,7 +111,7 @@ def _init_prompted() -> ConfigFile:
     return ConfigFile(cogito=cogito)
 
 
-@click.command()
+@click.command(cls=RootOptionsCommand)
 @click.option(
     "-s",
     "--scaffold",

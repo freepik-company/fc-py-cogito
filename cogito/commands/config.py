@@ -1,10 +1,11 @@
 import click
 
+from cogito.commands._help import RootOptionsGroup
 from cogito.core.exceptions import ConfigFileNotFoundError
 from cogito.core.config.file import ConfigFile
 
 
-@click.group()
+@click.group(cls=RootOptionsGroup)
 @click.pass_obj
 def config(ctx: click.Context) -> None:
     """Configuration management commands."""

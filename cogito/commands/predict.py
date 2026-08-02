@@ -2,11 +2,12 @@ import json
 
 import click
 
+from cogito.commands._help import RootOptionsCommand
 from cogito.core.exceptions import ConfigFileNotFoundError, NoSetupMethodError
 from cogito.lib.prediction import Predict
 
 
-@click.command()
+@click.command(cls=RootOptionsCommand)
 @click.option(
     "--payload", type=str, required=True, help="The payload for the prediction"
 )
