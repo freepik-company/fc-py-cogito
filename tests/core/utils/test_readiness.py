@@ -55,3 +55,25 @@ def test_get_readiness_file_path_expands_env_vars_and_user_home(tmp_path, monkey
     assert get_readiness_file_path("~/readiness.lock") == str(
         tmp_path / "readiness.lock"
     )
+
+
+def test_readiness_context_does_not_raise_when_file_removed_externally(tmp_path):
+    """An operator manually draining traffic (per the README) removes the
+    readiness file directly; the context manager must not blow up on exit."""
+    readiness_file = str(tmp_path / "readiness.lock")
+
+    with readiness_context(readiness_file):
+        os.remove(readiness_file)
+
+    assert not os.path.exists(readiness_file)
+
+
+def test_readiness_context_propagates_original_error_when_file_also_missing(tmp_path):
+    """The original exception must not be masked by the cleanup's own
+    FileNotFoundError when both happen together."""
+    readiness_file = str(tmp_path / "readiness.lock")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with readiness_context(readiness_file):
+            os.remove(readiness_file)
+            raise RuntimeError("boom")

@@ -1032,14 +1032,15 @@ The health endpoint can be used to configure Kubernetes probes for proper contai
    failureThreshold: 3
    ```
 
-   b) **File Existence Method**: Checks for the existence of the `readiness_file` directly:
+   b) **File Content Method**: Checks the `readiness_file`'s content directly. Note this must check the *content*, not just existence — the file is only ever considered ready when it holds exactly `ready`, the same check `/health-check` performs:
 
    ```yaml
    livenessProbe:
      exec:
        command:
-       - test
-       - -f
+       - grep
+       - -qx
+       - ready
        - /tmp/cogito-readiness.lock  # Must match readiness_file in cogito.yaml
      initialDelaySeconds: 5
      periodSeconds: 5
@@ -1058,14 +1059,15 @@ The health endpoint can be used to configure Kubernetes probes for proper contai
      periodSeconds: 5
    ```
 
-   b) **File Existence Method**: Checks for the existence of the `readiness_file` directly:
+   b) **File Content Method**: Checks the `readiness_file`'s content directly (same caveat as above — `test -f` alone is not enough):
 
    ```yaml
    readinessProbe:
      exec:
        command:
-       - test
-       - -f
+       - grep
+       - -qx
+       - ready
        - /tmp/cogito-readiness.lock  # Must match readiness_file in cogito.yaml
      initialDelaySeconds: 5
      periodSeconds: 5
@@ -1079,12 +1081,12 @@ The `readiness_file` parameter in your `cogito.yaml` (e.g., `/tmp/cogito-readine
    - Cogito automatically creates this file, with the content `ready`, once your predictor's `setup()` method has finished — i.e. once the model is fully loaded
    - The file is removed automatically when the application shuts down
    - `GET /health-check` returns `200 OK` while the file exists and contains `ready`, and `503 Service Unavailable` otherwise
-   - Kubernetes (or any orchestrator) can check this file directly (`test -f`) or indirectly through the `/health-check` endpoint
-   - You can also create or remove the file yourself (e.g. to drain traffic from a running instance for maintenance) — just make sure its content stays exactly `ready`, since that's what the health check validates
+   - Kubernetes (or any orchestrator) can check this file's *content* directly (e.g. `grep -qx ready <file>`) or indirectly through the `/health-check` endpoint — a plain existence check (`test -f`) is **not** equivalent and can report ready when `/health-check` correctly reports `503` (e.g. if the file was created with `touch` instead of the expected content)
+   - You can also create or remove the file yourself (e.g. to drain traffic from a running instance for maintenance) — just make sure its content is exactly `ready`, since that's what both the health check and the probe examples above validate
 
 **Choosing between methods**:
    - **HTTP endpoint method**: Provides more information (status codes, potential error messages) and follows standard HTTP patterns
-   - **File existence method**: Slightly more efficient as it doesn't require an HTTP call and works even if the application is temporarily unable to respond to HTTP requests
+   - **File content method**: Slightly more efficient as it doesn't require an HTTP call and works even if the application is temporarily unable to respond to HTTP requests
 
 This approach ensures that traffic is only directed to your service when it's fully ready to handle requests, preventing errors during startup or maintenance periods.
 

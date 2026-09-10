@@ -1,3 +1,4 @@
+import asyncio
 from typing import Callable
 
 from fastapi import Request, Response
@@ -12,7 +13,8 @@ def create_health_check_handler(readiness_file: str) -> Callable:
     """Build the /health-check handler bound to the configured readiness file."""
 
     async def health_check_handler(request: Request) -> JSONResponse:
-        if is_ready(readiness_file):
+        # is_ready() does blocking file I/O; run it off the event loop thread.
+        if await asyncio.to_thread(is_ready, readiness_file):
             return JSONResponse({"status": "OK"})
 
         return JSONResponse(

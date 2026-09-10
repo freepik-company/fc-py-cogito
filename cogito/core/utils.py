@@ -7,7 +7,7 @@ import os
 import time
 import traceback
 from inspect import Parameter, signature
-from typing import Any, Callable, Dict, get_type_hints
+from typing import Any, Callable, Dict, Iterator, get_type_hints
 
 try:
     # Pydantic v2
@@ -273,7 +273,7 @@ def is_ready(readiness_file: str) -> bool:
 
 
 @contextmanager
-def readiness_context(readiness_file: str) -> None:
+def readiness_context(readiness_file: str) -> Iterator[None]:
     full_readiness_file = get_readiness_file_path(readiness_file)
     folder = os.path.dirname(full_readiness_file)
     if folder:
@@ -284,4 +284,9 @@ def readiness_context(readiness_file: str) -> None:
     try:
         yield
     finally:
-        os.remove(full_readiness_file)
+        try:
+            os.remove(full_readiness_file)
+        except FileNotFoundError:
+            # Already removed, e.g. by an operator manually draining traffic
+            # (see the "Using the Readiness File" section in the README).
+            pass

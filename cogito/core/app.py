@@ -164,7 +164,7 @@ class Application:
             name="health_check",
             description=(
                 "Health check endpoint. Returns 200 while the readiness file "
-                "exists, 503 otherwise."
+                "exists and contains the readiness sentinel, 503 otherwise."
             ),
             tags=["health"],
             responses={
