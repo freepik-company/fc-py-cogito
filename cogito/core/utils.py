@@ -7,7 +7,7 @@ import os
 import time
 import traceback
 from inspect import Parameter, signature
-from typing import Any, Callable, Dict, get_type_hints
+from typing import Any, Callable, Dict, Iterator, get_type_hints
 
 try:
     # Pydantic v2
@@ -255,13 +255,38 @@ async def limit_concurrent_requests(semaphore: asyncio.Semaphore):
         semaphore.release()  # Libera el semáforo al finalizar
 
 
+READINESS_FILE_CONTENT = "ready"
+
+
+def get_readiness_file_path(readiness_file: str) -> str:
+    """Expand the configured readiness file path (~ and env vars)."""
+    return os.path.expandvars(os.path.expanduser(readiness_file))
+
+
+def is_ready(readiness_file: str) -> bool:
+    """Check the readiness file exists and holds the readiness sentinel."""
+    try:
+        with open(get_readiness_file_path(readiness_file)) as f:
+            return f.read().strip() == READINESS_FILE_CONTENT
+    except OSError:
+        return False
+
+
 @contextmanager
-def readiness_context(readiness_file: str) -> None:
-    full_readiness_file = os.path.expandvars(os.path.expanduser(readiness_file))
+def readiness_context(readiness_file: str) -> Iterator[None]:
+    full_readiness_file = get_readiness_file_path(readiness_file)
     folder = os.path.dirname(full_readiness_file)
-    os.makedirs(folder, exist_ok=True)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
 
     with open(full_readiness_file, "w") as f:
-        f.write("ready")
-    yield
-    os.remove(full_readiness_file)
+        f.write(READINESS_FILE_CONTENT)
+    try:
+        yield
+    finally:
+        try:
+            os.remove(full_readiness_file)
+        except FileNotFoundError:
+            # Already removed, e.g. by an operator manually draining traffic
+            # (see the "Using the Readiness File" section in the README).
+            pass
