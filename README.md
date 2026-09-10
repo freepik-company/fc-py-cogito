@@ -268,8 +268,11 @@ CMD ["cogito-cli", "run"]
      -e LOG_LEVEL=WARNING \
      --health-cmd="curl -f http://localhost:8000/health-check || exit 1" \
      --health-interval=30s \
+     --health-start-period=30s \
      my-cogito-app
    ```
+
+   > **Note**: `/health-check` returns `503` until the model's `setup()` finishes (see [Using the Readiness File](#using-the-readiness-file)). Set `--health-start-period` (or `start_period` in Compose) to at least your model's expected load time, or Docker will report the container as `unhealthy` during a perfectly normal startup.
 
 #### Docker Compose Example
 
@@ -992,18 +995,27 @@ When you deploy a Cogito application as a RESTful API, several standard endpoint
 
 - **URL**: `/health-check`
 - **Method**: `GET`
-- **Description**: Provides a simple health check mechanism to verify that the service is up and running.
-- **Response**: 
+- **Description**: Verifies that the service is up and ready to serve traffic by checking the `readiness_file` configured in `cogito.yaml` (see [Using the Readiness File](#using-the-readiness-file)).
+- **Response when ready** (`200 OK`):
   ```json
   {
     "status": "OK"
   }
   ```
-- **Usage**: Commonly used by container orchestration systems (like Kubernetes) for liveness and readiness probes.
+- **Response when not ready** (`503 Service Unavailable`):
+  ```json
+  {
+    "status": "ERROR",
+    "message": "Service is not ready"
+  }
+  ```
+- **Usage**: Commonly used by container orchestration systems (like Kubernetes) for liveness and readiness probes. Note that this endpoint reflects the application's *readiness*, not just process liveness — see the warning under [Kubernetes Integration](#kubernetes-integration) before wiring it to a liveness probe.
 
 ##### Kubernetes Integration
 
 The health endpoint can be used to configure Kubernetes probes for proper container lifecycle management:
+
+> **Warning**: The `readiness_file` is only created once the predictor's `setup()` method finishes (see [Using the Readiness File](#using-the-readiness-file)), so `/health-check` reports **readiness**, not process liveness. If your model takes longer to load than `initialDelaySeconds + periodSeconds × failureThreshold` in the example below, Kubernetes will repeatedly restart the container before it ever becomes ready. Prefer a [`startupProbe`](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/#define-startup-probes) on `/health-check` to cover the loading window, and either point the liveness probe at `/version` (which always returns `200`) or give it a generous `initialDelaySeconds`/`failureThreshold` that accounts for your model's load time.
 
 1. **Liveness Probe**: Determines if the application is running properly. If it fails, Kubernetes will restart the container.
 
@@ -1063,17 +1075,20 @@ The health endpoint can be used to configure Kubernetes probes for proper contai
 
 The `readiness_file` parameter in your `cogito.yaml` (e.g., `/tmp/cogito-readiness.lock`) provides an additional mechanism to control when your service is considered ready:
 
-**How it works**: 
-   - When your Cogito application starts, it checks if this file exists
-   - If the file exists, the health endpoint returns a 200 OK response
-   - If the file doesn't exist, it returns a 503 Service Unavailable response
-   - Kubernetes can check this file directly or through the health endpoint
+**How it works**:
+   - Cogito automatically creates this file, with the content `ready`, once your predictor's `setup()` method has finished — i.e. once the model is fully loaded
+   - The file is removed automatically when the application shuts down
+   - `GET /health-check` returns `200 OK` while the file exists and contains `ready`, and `503 Service Unavailable` otherwise
+   - Kubernetes (or any orchestrator) can check this file directly (`test -f`) or indirectly through the `/health-check` endpoint
+   - You can also create or remove the file yourself (e.g. to drain traffic from a running instance for maintenance) — just make sure its content stays exactly `ready`, since that's what the health check validates
 
 **Choosing between methods**:
    - **HTTP endpoint method**: Provides more information (status codes, potential error messages) and follows standard HTTP patterns
    - **File existence method**: Slightly more efficient as it doesn't require an HTTP call and works even if the application is temporarily unable to respond to HTTP requests
 
 This approach ensures that traffic is only directed to your service when it's fully ready to handle requests, preventing errors during startup or maintenance periods.
+
+> **Note**: The readiness file is only created inside the application's FastAPI `lifespan`. If you embed the underlying `Application` object without running its `lifespan` (for example, mounting `Application(...).app` into a custom ASGI setup without a lifespan-aware server), `/health-check` will always return `503`.
 
 #### Metrics Endpoint
 

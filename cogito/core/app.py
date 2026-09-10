@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
 from cogito.api.handlers import (
-    health_check_handler,
+    create_health_check_handler,
     metrics_handler,
     version_handler,
 )
@@ -159,11 +159,17 @@ class Application:
         """Include default routes"""
         self.app.add_api_route(
             "/health-check",
-            health_check_handler,
+            create_health_check_handler(self.config.cogito.get_server_readiness_file),
             methods=["GET"],
             name="health_check",
-            description="Health check endpoint",
+            description=(
+                "Health check endpoint. Returns 200 while the readiness file "
+                "exists, 503 otherwise."
+            ),
             tags=["health"],
+            responses={
+                503: {"description": "Service Unavailable: service is not ready"}
+            },
         )
 
         self.app.add_api_route(
