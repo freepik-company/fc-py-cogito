@@ -4,9 +4,10 @@ import sys
 import click
 
 from cogito import Application
+from cogito.commands._help import RootOptionsCommand
 
 
-@click.command()
+@click.command(cls=RootOptionsCommand)
 @click.pass_obj
 def run(ctx: click.Context) -> None:
     """Run cogito app"""

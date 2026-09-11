@@ -3,6 +3,7 @@ import os
 import click
 from jinja2 import Environment, FileSystemLoader
 
+from cogito.commands._help import RootOptionsCommand
 from cogito.core.config.file import ConfigFile
 from cogito.core.exceptions import ConfigFileNotFoundError
 
@@ -88,7 +89,7 @@ def scaffold_train_classes(config: ConfigFile, force: bool = False) -> bool:
     return True
 
 
-@click.command()
+@click.command(cls=RootOptionsCommand)
 @click.option(
     "-f",
     "--force",

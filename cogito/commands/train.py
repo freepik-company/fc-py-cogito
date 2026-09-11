@@ -2,11 +2,12 @@ import json
 
 import click
 
+from cogito.commands._help import RootOptionsCommand
 from cogito.core.exceptions import ConfigFileNotFoundError, NoSetupMethodError
 from cogito.lib.training import Trainer
 
 
-@click.command()
+@click.command(cls=RootOptionsCommand)
 @click.option("--payload", type=str, required=True, help="The payload for the training")
 @click.pass_obj
 def train(ctx: click.Context, payload: str) -> None:
