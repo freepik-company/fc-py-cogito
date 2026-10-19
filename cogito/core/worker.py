@@ -2,10 +2,12 @@ import importlib
 import multiprocessing
 import os
 import sys
+import threading
 import traceback
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from multiprocessing.connection import Connection
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Iterator, Mapping, Optional
 
 from cogito.core.exceptions import WorkerStartError
 
@@ -15,6 +17,9 @@ from cogito.core.exceptions import WorkerStartError
 _MP_CONTEXT = multiprocessing.get_context("spawn")
 
 STOP_MESSAGE = "stop"
+
+# Serialises the temporary changes to os.environ made while a worker starts.
+_SPAWN_ENV_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -61,7 +66,8 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     """
     Entry point of the worker process
     """
-    # The env must be set before the predictor module is imported.
+    # The worker already starts with this env (see _spawn_environ); applying it
+    # again keeps it in place before the predictor import however it was started.
     os.environ.update(env)
 
     try:
@@ -147,11 +153,34 @@ def _reap(process: multiprocessing.process.BaseProcess, timeout: float) -> None:
         process.join()
 
 
+@contextmanager
+def _spawn_environ(env: Dict[str, str]) -> Iterator[None]:
+    """
+    Apply env to this process while a worker is started, then restore it.
+
+    A spawned interpreter copies the parent's environment when it starts, before it
+    re-imports the launcher's main module and unpickles the worker arguments. Any
+    CUDA initialisation in that bootstrap then already sees the worker's devices.
+    """
+    with _SPAWN_ENV_LOCK:
+        previous = {key: os.environ.get(key) for key in env}
+        os.environ.update(env)
+        try:
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
 def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWorker:
     """
     Start a worker process for a predictor and wait until the predictor is loaded.
 
-    The predictor is imported only inside the worker, after its env is applied.
+    The worker starts with its env already applied, and the predictor is imported
+    only inside the worker.
     Raises WorkerStartError if the predictor cannot be loaded in time.
     """
     env = build_worker_env(spec)
@@ -164,7 +193,8 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
         args=(spec, env, child_conn),
         name=f"cogito-worker-{spec.name}",
     )
-    process.start()
+    with _spawn_environ(env):
+        process.start()
     # Only the worker keeps its end open, so its exit shows up as EOF here.
     child_conn.close()
 

@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import textwrap
 from types import MappingProxyType
@@ -48,6 +49,35 @@ PROBE_PREDICTOR = textwrap.dedent(
 
         def predict(self):
             return None
+    """
+)
+
+
+# A launcher whose main module is re-imported by every spawned worker during its
+# bootstrap, before the worker entry point runs.
+LAUNCHER = textwrap.dedent(
+    """
+    import json
+    import os
+    import sys
+
+    if __name__ == "__mp_main__":
+        with open(os.environ["COGITO_TEST_OUT"], "w") as out:
+            json.dump({"CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES")}, out)
+
+    from cogito.core.worker import WorkerSpec, spawn_worker
+
+    if __name__ == "__main__":
+        worker = spawn_worker(
+            WorkerSpec(
+                name="toy",
+                class_path="cogito_toy_predictor:Predictor",
+                cuda_visible_devices="5",
+                env={"COGITO_TEST_OUT": sys.argv[1]},
+            ),
+            start_timeout=60.0,
+        )
+        worker.stop(timeout=5.0)
     """
 )
 
@@ -190,6 +220,25 @@ def test_spawn_accepts_a_read_only_env_mapping(predictors_path, workers):
     workers.append(worker)
 
     assert worker.handshake["env"]["COGITO_TEST_RESOURCE"] == "quota"
+
+
+def test_worker_env_is_applied_before_the_launcher_bootstrap(predictors_path):
+    launcher = predictors_path / "launcher.py"
+    launcher.write_text(LAUNCHER)
+    out = predictors_path / "bootstrap.json"
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES="parent-devices")
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(predictors_path), env.get("PYTHONPATH")])
+    )
+
+    subprocess.run(
+        [sys.executable, str(launcher), str(out)],
+        env=env,
+        check=True,
+        timeout=120,
+    )
+
+    assert json.loads(out.read_text()) == {"CUDA_VISIBLE_DEVICES": "5"}
 
 
 def test_stop_leaves_no_live_process(predictors_path):
