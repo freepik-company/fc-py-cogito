@@ -47,3 +47,10 @@ class TrainerSetupError(Exception):
 class TrainerRunError(Exception):
     def __init__(self, error: Exception):
         super().__init__(f"Error training the model: {error}")
+
+
+class WorkerStartError(Exception):
+    def __init__(self, predictor: str, detail: str):
+        super().__init__(f"Unable to start worker for predictor {predictor}: {detail}")
+        self.predictor = predictor
+        self.detail = detail
