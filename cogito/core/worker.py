@@ -3,7 +3,7 @@ import multiprocessing
 import os
 import sys
 import traceback
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from multiprocessing.connection import Connection
 from typing import Any, Dict, Mapping, Optional
 
@@ -155,6 +155,9 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
     Raises WorkerStartError if the predictor cannot be loaded in time.
     """
     env = build_worker_env(spec)
+    # The spec is pickled to reach the worker: copy env into a plain dict, since
+    # some Mapping types (e.g. MappingProxyType) cannot be pickled.
+    spec = replace(spec, env=dict(spec.env))
     parent_conn, child_conn = _MP_CONTEXT.Pipe()
     process = _MP_CONTEXT.Process(
         target=_worker_main,

@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import textwrap
+from types import MappingProxyType
 
 import pytest
 
@@ -176,6 +177,19 @@ def test_one_worker_per_predictor_each_with_its_own_devices(predictors_path, wor
         seen = json.loads((predictors_path / f"probe-{device}.json").read_text())
         assert seen["CUDA_VISIBLE_DEVICES"] == device
         assert seen["COGITO_PREDICTOR_NAME"] == f"probe-{device}"
+
+
+def test_spawn_accepts_a_read_only_env_mapping(predictors_path, workers):
+    spec = WorkerSpec(
+        name="toy",
+        class_path="cogito_toy_predictor:Predictor",
+        env=MappingProxyType({"COGITO_TEST_RESOURCE": "quota"}),
+    )
+
+    worker = spawn_worker(spec, start_timeout=60.0)
+    workers.append(worker)
+
+    assert worker.handshake["env"]["COGITO_TEST_RESOURCE"] == "quota"
 
 
 def test_stop_leaves_no_live_process(predictors_path):
