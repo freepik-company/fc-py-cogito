@@ -960,6 +960,9 @@ class SupervisedWorker:
         self._worker: Optional[PredictorWorker] = None
         self._lock = threading.Lock()
         self._stopping = threading.Event()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = False
+        self._stopping_worker: Optional[PredictorWorker] = None
         self._gave_up = False
         # Written once by stop() and never read: once readable, it wakes the
         # monitor from whatever it waits on (the worker's exit or a start).
@@ -1072,46 +1075,56 @@ class SupervisedWorker:
         Stop the worker for good: it is not restarted, and a start in progress is
         abandoned. Safe to call more than once.
         """
-        stopping, worker = self._begin_stop()
-        if not stopping:
-            return
-        try:
+        with self._shutdown_lock:
+            stopping, worker = self._begin_stop()
+            if not stopping:
+                return
             if worker is not None:
                 try:
                     worker.stop(timeout)
                 except BaseException:
-                    # E.g. no thread left for the polite stop: nothing could reach
-                    # this worker after it.
+                    # Retain ownership if even termination is interrupted, so a
+                    # later stop or interpreter-exit cleanup can finish it.
                     worker.terminate(timeout)
+                    self._finish_stop()
                     raise
-        finally:
-            self._close_wake_pipe()
+            self._finish_stop()
 
     def terminate(self, timeout: float = 10.0) -> None:
         """
         stop(), terminating the worker without asking it first and without starting
         a thread: see PredictorWorker.terminate.
         """
-        stopping, worker = self._begin_stop()
-        if not stopping:
-            return
-        if worker is not None:
-            worker.terminate(timeout)
+        with self._shutdown_lock:
+            stopping, worker = self._begin_stop()
+            if not stopping:
+                return
+            if worker is not None:
+                worker.terminate(timeout)
+            self._finish_stop()
+
+    def _finish_stop(self) -> None:
         self._close_wake_pipe()
+        self._stopping_worker = None
+        self._shutdown_complete = True
 
     def _begin_stop(self) -> Tuple[bool, Optional[PredictorWorker]]:
         """
         Stop restarting the worker and wait for the monitor and any start to end.
 
-        Returns whether this call is the one stopping it, and the worker to stop.
+        Called with _shutdown_lock held, so cleanup attempts cannot race. A
+        previous attempt may have been interrupted: keep its worker recoverable
+        until _finish_stop confirms that cleanup completed.
         """
         with self._lock:
-            if self._stopping.is_set():
+            if self._shutdown_complete:
                 return False, None
-            # Set under the lock: start() and the monitor check it under the same
-            # lock before publishing a worker, so none is left running after this.
-            self._stopping.set()
-            worker, self._worker = self._worker, None
+            if not self._stopping.is_set():
+                # Preserve the handle before marking shutdown as started.
+                self._stopping_worker = self._worker
+                self._stopping.set()
+                self._worker = None
+            worker = self._stopping_worker
             started = self._started
         try:
             self._wake_writer.send(None)

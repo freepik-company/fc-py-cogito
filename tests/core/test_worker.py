@@ -2046,3 +2046,33 @@ def test_interrupted_shutdown_keeps_the_exit_cleanup_registered(
         assert not multiprocessing.active_children()
     finally:
         supervisor.stop()
+
+
+@pytest.mark.parametrize("resume", ["stop", "terminate"])
+def test_interrupted_monitor_join_keeps_worker_for_shutdown_retry(
+    supervision_path, supervised, monkeypatch, resume
+):
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
+    pid = worker.pid
+    real_join = worker._monitor.join
+
+    def interrupted_join(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(worker._monitor, "join", interrupted_join)
+        with pytest.raises(KeyboardInterrupt):
+            worker.stop(timeout=5.0)
+
+    assert pid_exists(pid)
+    assert worker._stopping_worker.pid == pid
+    assert not worker._shutdown_complete
+    assert not worker.is_available()
+    getattr(worker, resume)(timeout=5.0)
+    real_join(timeout=5.0)
+    assert not worker._monitor.is_alive()
+    assert worker._shutdown_complete
+    assert worker._stopping_worker is None
+    assert worker._wake_reader.closed
+    assert not pid_exists(pid)
+    assert not multiprocessing.active_children()
