@@ -1,13 +1,25 @@
+import asyncio
+import concurrent.futures
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
+import threading
 from types import MappingProxyType
 
 import pytest
+from pydantic import BaseModel
 
-from cogito.core.exceptions import WorkerStartError
+from cogito.core.exceptioin_handlers import worker_timeout_exception_handler
+from cogito.core.exceptions import (
+    BadRequestError,
+    WorkerPredictionError,
+    WorkerStartError,
+    WorkerTimeoutError,
+    WorkerUnavailableError,
+)
 from cogito.core.worker import WorkerSpec, build_worker_env, spawn_worker
 
 TOY_PREDICTOR = textwrap.dedent(
@@ -271,3 +283,535 @@ def test_missing_class_raises_worker_start_error(predictors_path):
         spawn_worker(spec, start_timeout=60.0)
 
     assert "Class Missing not found" in error.value.detail
+
+
+# Predictors for the request/response tests. Like the ones above, the parent never
+# imports them.
+IPC_PREDICTORS = {
+    "cogito_sleepy_predictor": """
+        import os
+        import time
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, value: int, delay: float = 0.0) -> dict:
+                time.sleep(delay)
+                return {"value": value, "pid": os.getpid()}
+    """,
+    "cogito_model_predictor": """
+        from pydantic import BaseModel
+
+
+        class Output(BaseModel):
+            text: str
+            length: int
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, text: str) -> Output:
+                return Output(text=text.upper(), length=len(text))
+    """,
+    "cogito_failing_predictor": """
+        from cogito.core.exceptions import BadRequestError
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, mode: str):
+                if mode == "bad-request":
+                    raise BadRequestError("value must be positive")
+                raise RuntimeError("model exploded")
+    """,
+    "cogito_async_predictor": """
+        import asyncio
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            async def predict(self, value: int, delay: float = 0.0) -> int:
+                await asyncio.sleep(delay)
+                return value * 2
+    """,
+    "cogito_exit_predictor": """
+        import sys
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, value: int) -> int:
+                if value < 0:
+                    sys.exit("negative value")
+                return value
+    """,
+    "cogito_async_exit_predictor": """
+        import sys
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            async def predict(self, value: int) -> int:
+                if value < 0:
+                    sys.exit("negative value")
+                return value
+    """,
+    "cogito_nested_exit_predictor": """
+        import asyncio
+        import sys
+
+
+        async def child():
+            sys.exit("child gave up")
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            async def predict(self) -> int:
+                await asyncio.gather(child())
+                return 0
+    """,
+    "cogito_odd_errors_predictor": """
+        from cogito.core.exceptions import BadRequestError
+
+
+        class NoMessage(BadRequestError):
+            def __init__(self):
+                pass  # skips BadRequestError.__init__: no .message
+
+
+        class BrokenStr(Exception):
+            def __str__(self):
+                raise RuntimeError("cannot render")
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, kind: str):
+                raise NoMessage() if kind == "no-message" else BrokenStr()
+    """,
+    "cogito_foreign_bad_request_predictor": """
+        class BadRequestError(Exception):
+            pass
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self):
+                raise BadRequestError("not cogito's")
+    """,
+    "cogito_subclass_predictor": """
+        class Score(float):
+            pass
+
+
+        class Label(str):
+            pass
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self) -> dict:
+                return {"score": Score(0.5), "label": Label("cat"), "scores": [Score(1)]}
+    """,
+    "cogito_exiting_predictor": """
+        import os
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self):
+                os._exit(3)
+    """,
+}
+
+
+class TextInput(BaseModel):
+    text: str
+
+
+@pytest.fixture
+def ipc_predictors_path(predictors_path):
+    for module, source in IPC_PREDICTORS.items():
+        (predictors_path / f"{module}.py").write_text(textwrap.dedent(source))
+    return predictors_path
+
+
+def start(workers, name, module, **spec_args):
+    worker = spawn_worker(
+        WorkerSpec(name=name, class_path=f"{module}:Predictor", **spec_args),
+        start_timeout=60.0,
+    )
+    workers.append(worker)
+    return worker
+
+
+def test_concurrent_requests_resolve_to_the_right_caller(ipc_predictors_path, workers):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor", concurrency=4)
+    values = list(range(12))
+
+    async def run():
+        # Earlier requests sleep longer, so responses come back out of order.
+        return await asyncio.gather(
+            *(
+                worker.predict({"value": value, "delay": (12 - value) * 0.02})
+                for value in values
+            )
+        )
+
+    results = asyncio.run(run())
+
+    assert [result["value"] for result in results] == values
+    assert {result["pid"] for result in results} == {worker.pid}
+
+
+def test_timeout_raises_and_the_late_response_is_dropped(ipc_predictors_path, workers):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor")
+
+    async def run():
+        with pytest.raises(WorkerTimeoutError) as error:
+            await worker.predict({"value": 1, "delay": 1.0}, timeout=0.2)
+        # Queued behind the timed-out request: it must get its own response, not
+        # the late one.
+        return error.value, await worker.predict({"value": 2}, timeout=30.0)
+
+    error, result = asyncio.run(run())
+
+    assert error.predictor == "sleepy"
+    assert str(error) == "Predictor sleepy did not respond within 0.2s"
+    assert result["value"] == 2
+    assert not worker._pending
+
+
+def test_timeout_surfaces_as_504_with_a_clear_message(ipc_predictors_path, workers):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor")
+
+    async def run():
+        try:
+            await worker.predict({"value": 1, "delay": 1.0}, timeout=0.2)
+        except WorkerTimeoutError as error:
+            return await worker_timeout_exception_handler(None, error)
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 504
+    assert json.loads(response.body) == {
+        "detail": "Predictor sleepy did not respond within 0.2s"
+    }
+
+
+def test_pydantic_input_and_output_cross_as_plain_data(ipc_predictors_path, workers):
+    worker = start(workers, "model", "cogito_model_predictor")
+
+    result = asyncio.run(worker.predict(TextInput(text="hello")))
+
+    assert result == {"text": "HELLO", "length": 5}
+    assert "cogito_model_predictor" not in sys.modules
+
+
+def test_bad_request_in_the_worker_raises_bad_request_error(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "failing", "cogito_failing_predictor")
+
+    with pytest.raises(BadRequestError) as error:
+        asyncio.run(worker.predict({"mode": "bad-request"}))
+
+    assert error.value.message == "value must be positive"
+
+
+def test_predictor_failure_raises_with_the_worker_traceback(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "failing", "cogito_failing_predictor")
+
+    with pytest.raises(WorkerPredictionError) as error:
+        asyncio.run(worker.predict({"mode": "crash"}))
+
+    assert error.value.predictor == "failing"
+    assert error.value.message == "model exploded"
+    assert "RuntimeError: model exploded" in error.value.traceback
+    assert worker.is_alive()
+
+
+def test_async_predictor_runs_in_the_worker(ipc_predictors_path, workers):
+    worker = start(workers, "async", "cogito_async_predictor", concurrency=3)
+
+    async def run():
+        return await asyncio.gather(
+            *(worker.predict({"value": value, "delay": 0.05}) for value in range(5))
+        )
+
+    assert asyncio.run(run()) == [0, 2, 4, 6, 8]
+
+
+def test_requests_in_flight_fail_when_the_worker_exits(ipc_predictors_path, workers):
+    worker = start(workers, "exiting", "cogito_exiting_predictor")
+
+    with pytest.raises(WorkerUnavailableError) as error:
+        asyncio.run(worker.predict({}, timeout=30.0))
+
+    assert error.value.predictor == "exiting"
+    worker.process.join(5.0)
+    assert worker.process.exitcode == 3
+
+
+def test_predict_after_stop_raises_worker_unavailable(ipc_predictors_path):
+    worker = spawn_worker(
+        WorkerSpec(name="sleepy", class_path="cogito_sleepy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+    worker.stop(timeout=5.0)
+
+    with pytest.raises(WorkerUnavailableError):
+        asyncio.run(worker.predict({"value": 1}))
+
+
+def test_stop_waits_for_requests_already_running(ipc_predictors_path):
+    worker = spawn_worker(
+        WorkerSpec(name="sleepy", class_path="cogito_sleepy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+
+    async def run():
+        request = asyncio.ensure_future(
+            worker.predict({"value": 7, "delay": 0.3}, timeout=30.0)
+        )
+        await asyncio.sleep(0.1)
+        await asyncio.to_thread(worker.stop, 5.0)
+        return await request
+
+    assert asyncio.run(run())["value"] == 7
+    assert worker.process.exitcode == 0
+
+
+def test_concurrency_must_be_positive():
+    with pytest.raises(ValueError):
+        WorkerSpec(name="toy", class_path="m:P", concurrency=0)
+
+
+def test_scalar_subclasses_from_the_predictor_module_cross_as_plain_data(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "subclass", "cogito_subclass_predictor")
+
+    result = asyncio.run(worker.predict({}))
+
+    assert result == {"score": 0.5, "label": "cat", "scores": [1.0]}
+    assert type(result["score"]) is float and type(result["label"]) is str
+    assert "cogito_subclass_predictor" not in sys.modules
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="needs SIGSTOP")
+def test_a_frozen_worker_times_out_and_still_stops(ipc_predictors_path):
+    worker = spawn_worker(
+        WorkerSpec(name="sleepy", class_path="cogito_sleepy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+    # A frozen worker stops reading, so a large request fills the pipe and the
+    # send itself blocks.
+    os.kill(worker.pid, signal.SIGSTOP)
+    padding = "x" * (16 * 1024 * 1024)
+
+    async def run():
+        try:
+            with pytest.raises(WorkerTimeoutError):
+                await worker.predict({"value": 1, "padding": padding}, timeout=0.5)
+        finally:
+            # The send is still blocked here, holding the send lock: stop() must not
+            # wait for it. Killing the worker then fails the blocked send, so this
+            # runs before asyncio.run waits for the sender thread.
+            await asyncio.to_thread(worker.stop, 1.0)
+
+    asyncio.run(asyncio.wait_for(run(), 30.0))
+
+    assert not worker.is_alive()
+
+
+@pytest.mark.parametrize(
+    "module", ["cogito_exit_predictor", "cogito_async_exit_predictor"]
+)
+def test_system_exit_in_the_predictor_answers_the_request(
+    ipc_predictors_path, workers, module
+):
+    worker = start(workers, "exit", module)
+
+    async def run():
+        with pytest.raises(WorkerPredictionError) as error:
+            await worker.predict({"value": -1}, timeout=30.0)
+        # The worker keeps serving requests afterwards.
+        return error.value, await worker.predict({"value": 4}, timeout=30.0)
+
+    error, result = asyncio.run(run())
+
+    assert error.message == "negative value"
+    assert "SystemExit: negative value" in error.traceback
+    assert result == 4
+    assert worker.is_alive()
+
+
+def test_a_foreign_bad_request_error_is_a_prediction_error(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "foreign", "cogito_foreign_bad_request_predictor")
+
+    with pytest.raises(WorkerPredictionError) as error:
+        asyncio.run(worker.predict({}))
+
+    assert not isinstance(error.value, BadRequestError)
+    assert error.value.message == "not cogito's"
+
+
+def test_worker_exit_fails_a_request_whose_send_is_still_queued(ipc_predictors_path):
+    worker = spawn_worker(
+        WorkerSpec(name="sleepy", class_path="cogito_sleepy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+    release = threading.Event()
+
+    async def run():
+        # Occupy the worker's sender thread, so the send stays queued.
+        busy = asyncio.wrap_future(worker._sender.submit(release.wait))
+        try:
+            request = asyncio.ensure_future(worker.predict({"value": 1}))
+            await asyncio.sleep(0.1)
+            worker.process.kill()
+            with pytest.raises(WorkerUnavailableError):
+                await asyncio.wait_for(request, 10.0)
+        finally:
+            release.set()
+            await busy
+
+    try:
+        asyncio.run(run())
+    finally:
+        worker.stop(timeout=5.0)
+
+
+def test_system_exit_in_a_nested_task_fails_the_request(ipc_predictors_path, workers):
+    worker = start(workers, "nested", "cogito_nested_exit_predictor")
+
+    with pytest.raises(WorkerUnavailableError):
+        asyncio.run(asyncio.wait_for(worker.predict({}), 30.0))
+
+    worker.process.join(5.0)
+    assert worker.process.exitcode == 1
+
+
+def test_sends_do_not_depend_on_the_default_executor(ipc_predictors_path, workers):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor")
+    release = threading.Event()
+
+    async def run():
+        # A default executor exhausted by anything else (another worker's blocked
+        # sends, say) must not delay this worker's requests.
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+        busy = loop.run_in_executor(None, release.wait)
+        try:
+            return await worker.predict({"value": 3}, timeout=10.0)
+        finally:
+            release.set()
+            await busy
+
+    assert asyncio.run(run())["value"] == 3
+
+
+def test_a_request_abandoned_while_queued_is_skipped_by_the_worker(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor")
+
+    async def run():
+        # Keeps the only worker thread busy for 1s.
+        running = asyncio.ensure_future(worker.predict({"value": 1, "delay": 1.0}))
+        await asyncio.sleep(0.1)
+        # Queued behind it, and abandoned: the worker must not run its 5s.
+        with pytest.raises(WorkerTimeoutError):
+            await worker.predict({"value": 2, "delay": 5.0}, timeout=0.2)
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        result = await worker.predict({"value": 3}, timeout=30.0)
+        return (await running)["value"], result["value"], loop.time() - start_time
+
+    first, third, waited = asyncio.run(run())
+
+    assert (first, third) == (1, 3)
+    # Only what is left of the first request, not the abandoned 5s on top.
+    assert waited < 3.0
+
+
+def test_odd_exceptions_still_get_a_reply(ipc_predictors_path, workers):
+    worker = start(workers, "odd", "cogito_odd_errors_predictor")
+
+    async def run():
+        with pytest.raises(BadRequestError):
+            await worker.predict({"kind": "no-message"}, timeout=30.0)
+        with pytest.raises(WorkerPredictionError) as error:
+            await worker.predict({"kind": "broken-str"}, timeout=30.0)
+        return error.value
+
+    error = asyncio.run(run())
+
+    assert "BrokenStr" in error.message
+
+
+def test_a_request_abandoned_while_its_send_is_running_is_still_cancelled(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor")
+    send = worker._send
+    sending = threading.Event()
+    release = threading.Event()
+
+    def slow_send(message):
+        # Holds the send of the request with value 2 in progress, as a large
+        # payload would.
+        if isinstance(message, dict) and message.get("inputs", {}).get("value") == 2:
+            sending.set()
+            release.wait()
+        send(message)
+
+    worker._send = slow_send
+
+    async def run():
+        running = asyncio.ensure_future(worker.predict({"value": 1, "delay": 1.0}))
+        await asyncio.sleep(0.1)
+        try:
+            with pytest.raises(WorkerTimeoutError):
+                await worker.predict({"value": 2, "delay": 5.0}, timeout=0.2)
+            assert sending.is_set()
+        finally:
+            release.set()
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        result = await worker.predict({"value": 3}, timeout=30.0)
+        return (await running)["value"], result["value"], loop.time() - start_time
+
+    first, third, waited = asyncio.run(run())
+
+    assert (first, third) == (1, 3)
+    # The abandoned 5s request was skipped by the worker.
+    assert waited < 3.0
