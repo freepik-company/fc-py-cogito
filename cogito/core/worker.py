@@ -131,6 +131,11 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     # the shutdown and stops its workers itself; a worker killed by it would be
     # taken for a crash and restarted while the gateway shuts down.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # Its own process group, so the processes its predictor starts can be stopped
+    # with it (see _kill_process_group). Left behind they would be orphans, and
+    # keep the worker's pipes open after it is gone.
+    if hasattr(os, "setpgrp"):
+        os.setpgrp()
 
     # The worker already starts with this env (see _spawn_environ); applying it
     # again keeps it in place before the predictor import however it was started.
@@ -558,6 +563,7 @@ class PredictorWorker:
         if self.process.is_alive():
             self.process.kill()
             self.process.join()
+        _kill_process_group(self.process)
         self._sender.shutdown(wait=False, cancel_futures=True)
         self._reader.join(timeout)
         self._fail_pending()
@@ -604,6 +610,24 @@ def _reap(process: multiprocessing.process.BaseProcess, timeout: float) -> None:
     if process.is_alive():
         process.kill()
         process.join()
+    _kill_process_group(process)
+
+
+def _kill_process_group(process: multiprocessing.process.BaseProcess) -> None:
+    """
+    Kill what is left of a stopped worker's process group: the processes its
+    predictor started, which would otherwise outlive it holding its pipes open.
+
+    The group id is the worker's pid. While a member is alive the group keeps that
+    id from being reused, and with no member left there is nothing to kill.
+    """
+    if not hasattr(os, "killpg") or process.pid is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # No member left, or the worker died before creating its group.
+        pass
 
 
 @contextmanager
@@ -749,6 +773,9 @@ class RestartPolicy:
         """
         Seconds to wait before the restart number attempt, counting from 0
         """
+        if self.initial_delay == 0:
+            # Before the power, which can overflow for a large attempt.
+            return 0.0
         try:
             delay = self.initial_delay * self.multiplier**attempt
         except OverflowError:

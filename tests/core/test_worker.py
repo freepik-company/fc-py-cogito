@@ -868,6 +868,25 @@ SUPERVISION_PREDICTORS = {
                     f.write(str(helper))
                 os._exit(3)
     """,
+    # Forks a helper that outlives the request and returns its pid.
+    "cogito_helper_predictor": """
+        import os
+        import time
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, spawn_helper: bool = False, padding: str = "") -> int:
+                if not spawn_helper:
+                    return os.getpid()
+                helper = os.fork()
+                if helper == 0:
+                    time.sleep(60)
+                    os._exit(0)
+                return helper
+    """,
     # Fails to load while the file named by COGITO_TEST_MARKER exists, and loads
     # slowly while the one named by COGITO_TEST_SLOW exists.
     "cogito_flaky_predictor": """
@@ -891,7 +910,8 @@ SUPERVISION_PREDICTORS = {
 
 # Starts the supervised workers, writes their pids to argv[1] and then, depending
 # on argv[2]: returns without stopping them; returns while a send to a frozen
-# worker is still blocked; waits for SIGTERM the way uvicorn does (a handler that
+# worker is still blocked (also with a helper the worker forked holding the pipe);
+# waits for SIGTERM the way uvicorn does (a handler that
 # leaves the interpreter normally); or just waits.
 SUPERVISOR_LAUNCHER = textwrap.dedent(
     """
@@ -911,7 +931,7 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         supervisor = WorkerSupervisor(
             [
-                WorkerSpec(name=name, class_path="cogito_crashy_predictor:Predictor")
+                WorkerSpec(name=name, class_path="cogito_helper_predictor:Predictor")
                 for name in ("first", "second")
             ],
             start_timeout=60.0,
@@ -919,7 +939,12 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
         )
         supervisor.start()
         pids = [worker.pid for worker in supervisor]
-        if mode == "blocked":
+        if mode == "blocked-helper":
+            # The helper holds the frozen worker's end of the pipe as well.
+            pids.append(
+                asyncio.run(supervisor["first"].predict({"spawn_helper": True}))
+            )
+        if mode.startswith("blocked"):
             # A frozen worker stops reading, so a large request fills the pipe and
             # its send stays blocked after the request times out.
             os.kill(pids[0], signal.SIGSTOP)
@@ -1355,6 +1380,18 @@ def test_no_worker_is_left_when_exiting_with_a_send_still_blocked(
     assert not any(pid_exists(pid) for pid in pids)
 
 
+def test_no_process_is_left_when_a_forked_helper_holds_a_blocked_pipe(
+    supervision_path, launchers
+):
+    process, pids = run_supervisor_launcher(
+        launchers, supervision_path, "blocked-helper"
+    )
+
+    assert process.wait(timeout=60) == 0
+    # The helper is reparented once its worker dies: wait for it to be reaped.
+    wait_until(lambda: not any(pid_exists(pid) for pid in pids), timeout=10.0)
+
+
 def test_no_worker_is_left_after_sigterm(supervision_path, launchers):
     process, pids = run_supervisor_launcher(launchers, supervision_path, "sigterm")
     assert all(pid_exists(pid) for pid in pids)
@@ -1555,3 +1592,39 @@ def test_requests_fail_when_a_forked_helper_keeps_the_pipe_open(
             helper = int(out.read_text())
             if pid_exists(helper):
                 os.kill(helper, signal.SIGKILL)
+
+
+def test_zero_initial_delay_stays_zero_for_any_attempt():
+    policy = RestartPolicy(initial_delay=0.0)
+
+    assert policy.delay(0) == 0.0
+    assert policy.delay(10_000) == 0.0
+
+
+def test_stop_kills_the_processes_the_predictor_started(supervision_path, supervised):
+    worker = supervise(supervised, "helper", "cogito_helper_predictor")
+    helper = asyncio.run(worker.predict({"spawn_helper": True}, timeout=30.0))
+    assert pid_exists(helper)
+
+    try:
+        worker.stop(timeout=5.0)
+
+        wait_until(lambda: not pid_exists(helper), timeout=10.0)
+    finally:
+        if pid_exists(helper):
+            os.kill(helper, signal.SIGKILL)
+
+
+def test_a_crashed_worker_leaves_no_forked_helper(supervision_path, supervised):
+    worker = supervise(supervised, "forking", "cogito_forking_predictor")
+    out = supervision_path / "helper.pid"
+
+    with pytest.raises(WorkerUnavailableError):
+        asyncio.run(asyncio.wait_for(worker.predict({"out": str(out)}), timeout=20.0))
+
+    helper = int(out.read_text())
+    try:
+        wait_until(lambda: not pid_exists(helper), timeout=10.0)
+    finally:
+        if pid_exists(helper):
+            os.kill(helper, signal.SIGKILL)
