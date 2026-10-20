@@ -870,31 +870,50 @@ SUPERVISION_PREDICTORS = {
 }
 
 # Starts the supervised workers, writes their pids to argv[1] and then, depending
-# on argv[2], returns without stopping them, waits for SIGTERM the way uvicorn
-# does (a handler that leaves the interpreter normally), or just waits.
+# on argv[2]: returns without stopping them; returns while a send to a frozen
+# worker is still blocked; waits for SIGTERM the way uvicorn does (a handler that
+# leaves the interpreter normally); or just waits.
 SUPERVISOR_LAUNCHER = textwrap.dedent(
     """
+    import asyncio
     import json
+    import os
     import signal
     import sys
     import time
 
+    from cogito.core.exceptions import WorkerTimeoutError
     from cogito.core.worker import WorkerSpec, WorkerSupervisor
 
     if __name__ == "__main__":
+        mode = sys.argv[2]
+        if mode == "sigterm":
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         supervisor = WorkerSupervisor(
             [
                 WorkerSpec(name=name, class_path="cogito_crashy_predictor:Predictor")
                 for name in ("first", "second")
             ],
             start_timeout=60.0,
+            stop_timeout=2.0,
         )
         supervisor.start()
+        pids = [worker.pid for worker in supervisor]
+        if mode == "blocked":
+            # A frozen worker stops reading, so a large request fills the pipe and
+            # its send stays blocked after the request times out.
+            os.kill(pids[0], signal.SIGSTOP)
+            try:
+                asyncio.run(
+                    supervisor["first"].predict(
+                        {"padding": "x" * (16 * 1024 * 1024)}, timeout=0.5
+                    )
+                )
+            except WorkerTimeoutError:
+                pass
         with open(sys.argv[1], "w") as out:
-            json.dump([worker.pid for worker in supervisor], out)
-        if sys.argv[2] == "sigterm":
-            signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-        if sys.argv[2] != "return":
+            json.dump(pids, out)
+        if mode in ("sigterm", "wait"):
             while True:
                 time.sleep(0.1)
     """
@@ -1168,6 +1187,35 @@ def test_stop_abandons_a_restart_in_progress(supervision_path, supervised, monke
     assert not multiprocessing.active_children()
 
 
+def test_stop_abandons_the_first_start(supervision_path, monkeypatch):
+    slow = supervision_path / "slow"
+    slow.touch()
+    monkeypatch.setenv("COGITO_TEST_SLOW", str(slow))
+    worker = SupervisedWorker(
+        WorkerSpec(name="flaky", class_path="cogito_flaky_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+    errors = []
+
+    def start():
+        try:
+            worker.start()
+        except WorkerStartError as error:
+            errors.append(error)
+
+    starter = threading.Thread(target=start)
+    starter.start()
+    # The worker is now importing its predictor, which takes 60s.
+    wait_until(lambda: multiprocessing.active_children())
+    worker.stop(timeout=5.0)
+    starter.join(20.0)
+
+    assert not starter.is_alive()
+    assert [error.detail for error in errors] == ["stopped while starting"]
+    assert worker._monitor is None
+    assert not multiprocessing.active_children()
+
+
 def test_stop_leaves_no_live_worker_and_is_idempotent(supervision_path, supervised):
     worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
     pid = worker.pid
@@ -1255,6 +1303,13 @@ def test_no_worker_is_left_when_the_gateway_returns_without_stopping(
     assert not any(pid_exists(pid) for pid in pids)
 
 
+def test_no_worker_is_left_when_exiting_with_a_send_still_blocked(supervision_path):
+    process, pids = run_supervisor_launcher(supervision_path, "blocked")
+
+    assert process.wait(timeout=60) == 0
+    assert not any(pid_exists(pid) for pid in pids)
+
+
 def test_no_worker_is_left_after_sigterm(supervision_path):
     process, pids = run_supervisor_launcher(supervision_path, "sigterm")
     assert all(pid_exists(pid) for pid in pids)
@@ -1304,11 +1359,10 @@ def test_an_unexpected_error_while_restarting_is_retried(
     calls = []
 
     def flaky_spawn(*args, **kwargs):
-        # Only restarts pass abort; the first start must succeed.
-        if kwargs.get("abort") is not None:
-            calls.append(None)
-            if len(calls) == 1:
-                raise OSError("Too many open files")
+        # The first call is the first start, which must succeed.
+        calls.append(None)
+        if len(calls) == 2:
+            raise OSError("Too many open files")
         return real_spawn(*args, **kwargs)
 
     monkeypatch.setattr(worker_module, "_spawn", flaky_spawn)
@@ -1317,4 +1371,4 @@ def test_an_unexpected_error_while_restarting_is_retried(
     os.kill(worker.pid, signal.SIGKILL)
 
     wait_until(lambda: worker.restarts == 1 and worker.is_available())
-    assert len(calls) == 2
+    assert len(calls) == 3
