@@ -776,3 +776,42 @@ def test_odd_exceptions_still_get_a_reply(ipc_predictors_path, workers):
     error = asyncio.run(run())
 
     assert "BrokenStr" in error.message
+
+
+def test_a_request_abandoned_while_its_send_is_running_is_still_cancelled(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor")
+    send = worker._send
+    sending = threading.Event()
+    release = threading.Event()
+
+    def slow_send(message):
+        # Holds the send of the request with value 2 in progress, as a large
+        # payload would.
+        if isinstance(message, dict) and message.get("inputs", {}).get("value") == 2:
+            sending.set()
+            release.wait()
+        send(message)
+
+    worker._send = slow_send
+
+    async def run():
+        running = asyncio.ensure_future(worker.predict({"value": 1, "delay": 1.0}))
+        await asyncio.sleep(0.1)
+        try:
+            with pytest.raises(WorkerTimeoutError):
+                await worker.predict({"value": 2, "delay": 5.0}, timeout=0.2)
+            assert sending.is_set()
+        finally:
+            release.set()
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        result = await worker.predict({"value": 3}, timeout=30.0)
+        return (await running)["value"], result["value"], loop.time() - start_time
+
+    first, third, waited = asyncio.run(run())
+
+    assert (first, third) == (1, 3)
+    # The abandoned 5s request was skipped by the worker.
+    assert waited < 3.0

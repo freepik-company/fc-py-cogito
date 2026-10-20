@@ -396,12 +396,13 @@ class PredictorWorker:
         # future, so the request only ever waits on that future: a worker exit
         # fails it even while the send is still queued behind another one.
         try:
-            send = loop.run_in_executor(self._sender, self._send, message)
+            send_job = self._sender.submit(self._send, message)
         except RuntimeError:
             # The worker was stopped in the meantime.
             with self._pending_lock:
                 self._pending.pop(request_id, None)
             raise WorkerUnavailableError(name, "worker is not running") from None
+        send = asyncio.wrap_future(send_job, loop=loop)
         send.add_done_callback(functools.partial(_forward_send_failure, future, name))
         abandoned = False
         try:
@@ -415,11 +416,14 @@ class PredictorWorker:
                 abandoned = True
                 raise
         finally:
-            # A send still queued never runs. One already sent is cancelled in the
-            # worker, which skips it unless it already started; a late response
-            # is dropped by the reader.
-            send.cancel()
-            if abandoned and not send.cancelled():
+            # Cancel the send job itself, not its asyncio wrapper: the wrapper can
+            # be cancelled while the job is already running. A job still queued
+            # never runs. One running or done reaches the worker, so an abandoned
+            # request is cancelled there too: the single sender thread sends the
+            # cancel after it, and the worker skips it unless it already started.
+            # A late response is dropped by the reader.
+            sent = not send_job.cancel()
+            if abandoned and sent:
                 self._send_in_background({"type": CANCEL_MESSAGE, "id": request_id})
             with self._pending_lock:
                 self._pending.pop(request_id, None)
