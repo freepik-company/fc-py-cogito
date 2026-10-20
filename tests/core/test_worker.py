@@ -1,10 +1,12 @@
 import asyncio
+import concurrent.futures
 import json
 import os
 import signal
 import subprocess
 import sys
 import textwrap
+import threading
 from types import MappingProxyType
 
 import pytest
@@ -642,3 +644,31 @@ def test_a_foreign_bad_request_error_is_a_prediction_error(
 
     assert not isinstance(error.value, BadRequestError)
     assert error.value.message == "not cogito's"
+
+
+def test_worker_exit_fails_a_request_whose_send_is_still_queued(ipc_predictors_path):
+    worker = spawn_worker(
+        WorkerSpec(name="sleepy", class_path="cogito_sleepy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+    release = threading.Event()
+
+    async def run():
+        # Occupy the only thread of the default executor, so the send stays queued.
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+        busy = loop.run_in_executor(None, release.wait)
+        try:
+            request = asyncio.ensure_future(worker.predict({"value": 1}))
+            await asyncio.sleep(0.1)
+            worker.process.kill()
+            with pytest.raises(WorkerUnavailableError):
+                await asyncio.wait_for(request, 10.0)
+        finally:
+            release.set()
+            await busy
+
+    try:
+        asyncio.run(run())
+    finally:
+        worker.stop(timeout=5.0)

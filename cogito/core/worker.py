@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import importlib
 import inspect
 import json
@@ -331,17 +332,22 @@ class PredictorWorker:
                 raise WorkerUnavailableError(name, "worker is not running")
             self._pending[request_id] = (loop, future)
 
+        message = {"type": PREDICT_MESSAGE, "id": request_id, "inputs": inputs}
+        # The send runs on its own and a failure is forwarded to the response
+        # future, so the request only ever waits on that future: a worker exit
+        # fails it even while the send is still queued for an executor thread.
+        send = asyncio.ensure_future(asyncio.to_thread(self._send, message))
+        send.add_done_callback(functools.partial(_forward_send_failure, future, name))
         try:
-            message = {"type": PREDICT_MESSAGE, "id": request_id, "inputs": inputs}
             try:
                 # One deadline for sending the request and waiting for its response.
-                response = await asyncio.wait_for(
-                    self._roundtrip(message, future), timeout
-                )
+                response = await asyncio.wait_for(future, timeout)
             except asyncio.TimeoutError:
                 raise WorkerTimeoutError(name, timeout) from None
         finally:
-            # A response arriving after this point is dropped by the reader.
+            # A send still queued never runs; one already running finishes in its
+            # thread and its late response, if any, is dropped by the reader.
+            send.cancel()
             with self._pending_lock:
                 self._pending.pop(request_id, None)
 
@@ -350,15 +356,6 @@ class PredictorWorker:
         if response["error_type"] == BAD_REQUEST_ERROR_TYPE:
             raise BadRequestError(response["message"])
         raise WorkerPredictionError(name, response["message"], response["traceback"])
-
-    async def _roundtrip(
-        self, message: Dict[str, Any], future: asyncio.Future
-    ) -> Dict[str, Any]:
-        try:
-            await asyncio.to_thread(self._send, message)
-        except (BrokenPipeError, OSError) as e:
-            raise WorkerUnavailableError(self.spec.name, str(e)) from e
-        return await future
 
     def _send(self, message: Any) -> None:
         with self._send_lock:
@@ -438,6 +435,19 @@ def _call_soon(loop: asyncio.AbstractEventLoop, callback, *args) -> None:
     except RuntimeError:
         # The caller's event loop is already closed: nobody is waiting.
         pass
+
+
+def _forward_send_failure(
+    future: asyncio.Future, predictor: str, send: asyncio.Future
+) -> None:
+    if send.cancelled():
+        return
+    error = send.exception()
+    if error is None or future.done():
+        return
+    if isinstance(error, (BrokenPipeError, OSError)):
+        error = WorkerUnavailableError(predictor, str(error))
+    future.set_exception(error)
 
 
 def _set_future_result(future: asyncio.Future, result: Any) -> None:
