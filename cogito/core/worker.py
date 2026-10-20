@@ -807,14 +807,20 @@ class SupervisedWorker:
             with self._lock:
                 stopped = self._stopping.is_set()
                 if not stopped:
-                    self._worker = worker
-                    self._monitor = threading.Thread(
+                    monitor = threading.Thread(
                         target=self._watch,
                         args=(worker,),
                         name=f"cogito-supervisor-{self.spec.name}",
                         daemon=True,
                     )
-                    self._monitor.start()
+                    try:
+                        monitor.start()
+                    except BaseException:
+                        # E.g. no threads left: nothing would watch or stop it.
+                        worker.terminate(timeout=1.0)
+                        raise
+                    self._worker = worker
+                    self._monitor = monitor
             if stopped:
                 worker.terminate(timeout=1.0)
                 raise WorkerStartError(self.spec.name, "stopped while starting")

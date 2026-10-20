@@ -1436,3 +1436,28 @@ def test_a_worker_that_cannot_be_tracked_after_its_handshake_is_reaped(
         )
 
     assert not multiprocessing.active_children()
+
+
+def test_a_worker_whose_monitor_cannot_start_is_terminated(
+    supervision_path, monkeypatch
+):
+    real_start = threading.Thread.start
+
+    def start(thread):
+        if thread.name.startswith("cogito-supervisor-"):
+            raise RuntimeError("can't start new thread")
+        return real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    worker = SupervisedWorker(
+        WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+
+    with pytest.raises(RuntimeError):
+        worker.start()
+
+    assert worker._monitor is None
+    assert worker.pid is None
+    assert not multiprocessing.active_children()
+    worker.stop(timeout=5.0)
