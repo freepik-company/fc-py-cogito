@@ -385,6 +385,27 @@ IPC_PREDICTORS = {
                 await asyncio.gather(child())
                 return 0
     """,
+    "cogito_odd_errors_predictor": """
+        from cogito.core.exceptions import BadRequestError
+
+
+        class NoMessage(BadRequestError):
+            def __init__(self):
+                pass  # skips BadRequestError.__init__: no .message
+
+
+        class BrokenStr(Exception):
+            def __str__(self):
+                raise RuntimeError("cannot render")
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, kind: str):
+                raise NoMessage() if kind == "no-message" else BrokenStr()
+    """,
     "cogito_foreign_bad_request_predictor": """
         class BadRequestError(Exception):
             pass
@@ -671,10 +692,8 @@ def test_worker_exit_fails_a_request_whose_send_is_still_queued(ipc_predictors_p
     release = threading.Event()
 
     async def run():
-        # Occupy the only thread of the default executor, so the send stays queued.
-        loop = asyncio.get_running_loop()
-        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
-        busy = loop.run_in_executor(None, release.wait)
+        # Occupy the worker's sender thread, so the send stays queued.
+        busy = asyncio.wrap_future(worker._sender.submit(release.wait))
         try:
             request = asyncio.ensure_future(worker.predict({"value": 1}))
             await asyncio.sleep(0.1)
@@ -699,3 +718,61 @@ def test_system_exit_in_a_nested_task_fails_the_request(ipc_predictors_path, wor
 
     worker.process.join(5.0)
     assert worker.process.exitcode == 1
+
+
+def test_sends_do_not_depend_on_the_default_executor(ipc_predictors_path, workers):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor")
+    release = threading.Event()
+
+    async def run():
+        # A default executor exhausted by anything else (another worker's blocked
+        # sends, say) must not delay this worker's requests.
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(concurrent.futures.ThreadPoolExecutor(max_workers=1))
+        busy = loop.run_in_executor(None, release.wait)
+        try:
+            return await worker.predict({"value": 3}, timeout=10.0)
+        finally:
+            release.set()
+            await busy
+
+    assert asyncio.run(run())["value"] == 3
+
+
+def test_a_request_abandoned_while_queued_is_skipped_by_the_worker(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "sleepy", "cogito_sleepy_predictor")
+
+    async def run():
+        # Keeps the only worker thread busy for 1s.
+        running = asyncio.ensure_future(worker.predict({"value": 1, "delay": 1.0}))
+        await asyncio.sleep(0.1)
+        # Queued behind it, and abandoned: the worker must not run its 5s.
+        with pytest.raises(WorkerTimeoutError):
+            await worker.predict({"value": 2, "delay": 5.0}, timeout=0.2)
+        loop = asyncio.get_running_loop()
+        start_time = loop.time()
+        result = await worker.predict({"value": 3}, timeout=30.0)
+        return (await running)["value"], result["value"], loop.time() - start_time
+
+    first, third, waited = asyncio.run(run())
+
+    assert (first, third) == (1, 3)
+    # Only what is left of the first request, not the abandoned 5s on top.
+    assert waited < 3.0
+
+
+def test_odd_exceptions_still_get_a_reply(ipc_predictors_path, workers):
+    worker = start(workers, "odd", "cogito_odd_errors_predictor")
+
+    async def run():
+        with pytest.raises(BadRequestError):
+            await worker.predict({"kind": "no-message"}, timeout=30.0)
+        with pytest.raises(WorkerPredictionError) as error:
+            await worker.predict({"kind": "broken-str"}, timeout=30.0)
+        return error.value
+
+    error = asyncio.run(run())
+
+    assert "BrokenStr" in error.message

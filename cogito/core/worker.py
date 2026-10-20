@@ -37,6 +37,7 @@ STOP_MESSAGE = "stop"
 # Messages exchanged after the start handshake. A request carries a correlation id
 # that its response echoes back, so responses can arrive in any order:
 #   {"type": "predict", "id": str, "inputs": dict}
+#   {"type": "cancel", "id": str}   the caller gave up: skip it if not started
 #   {"type": "result", "id": str, "status": "ok", "result": Any}
 #   {"type": "result", "id": str, "status": "error", "error_type": str,
 #    "message": str, "traceback": str}
@@ -44,6 +45,7 @@ STOP_MESSAGE = "stop"
 # type from the predictor module (even a str/int/float subclass), and unpickling
 # it would import that module in the gateway.
 PREDICT_MESSAGE = "predict"
+CANCEL_MESSAGE = "cancel"
 RESULT_MESSAGE = "result"
 
 
@@ -191,44 +193,67 @@ async def _capture(coroutine) -> Tuple[bool, Any]:
         return True, e
 
 
-def _handle_request(
-    call: Callable[..., Any],
-    message: Dict[str, Any],
-    reply: Callable[[str], None],
-) -> None:
+def _error_response(request_id: str, error: BaseException) -> Dict[str, Any]:
+    is_bad_request = isinstance(error, BadRequestError)
+    try:
+        message = (getattr(error, "message", None) if is_bad_request else None) or str(
+            error
+        )
+    except BaseException:
+        message = f"{_qualified_name(type(error))} (message unavailable)"
+    return {
+        "type": RESULT_MESSAGE,
+        "id": request_id,
+        "status": "error",
+        "error_type": (
+            BAD_REQUEST_ERROR_TYPE if is_bad_request else _qualified_name(type(error))
+        ),
+        "message": message,
+        "traceback": traceback.format_exc(),
+    }
+
+
+def _run_request(call: Callable[..., Any], message: Dict[str, Any]) -> str:
     """
-    Run one request and send its response, tagged with the request's id
+    Run one request and return its response as JSON text
     """
-    response = {"type": RESULT_MESSAGE, "id": message["id"]}
     try:
         result = jsonable_encoder(call(**message["inputs"]))
     except BaseException as e:
         # BaseException too: a SystemExit lost in the executor's future would leave
         # the request without a response.
-        is_bad_request = isinstance(e, BadRequestError)
-        response.update(
-            status="error",
-            error_type=(
-                BAD_REQUEST_ERROR_TYPE if is_bad_request else _qualified_name(type(e))
-            ),
-            message=e.message if is_bad_request else str(e),
-            traceback=traceback.format_exc(),
-        )
+        response = _error_response(message["id"], e)
     else:
-        response.update(status="ok", result=result)
+        response = {
+            "type": RESULT_MESSAGE,
+            "id": message["id"],
+            "status": "ok",
+            "result": result,
+        }
     try:
-        payload = json.dumps(response)
+        return json.dumps(response)
     except (TypeError, ValueError) as e:
-        payload = json.dumps(
-            {
-                "type": RESULT_MESSAGE,
-                "id": message["id"],
-                "status": "error",
-                "error_type": type(e).__name__,
-                "message": f"Unable to serialise the prediction result: {e}",
-                "traceback": traceback.format_exc(),
-            }
-        )
+        error = _error_response(message["id"], e)
+        error["message"] = f"Unable to serialise the prediction result: {e}"
+        return json.dumps(error)
+
+
+def _handle_request(
+    call: Callable[..., Any],
+    message: Dict[str, Any],
+    claim: Callable[[str], bool],
+    reply: Callable[[str], None],
+) -> None:
+    """
+    Run one request, unless it was cancelled while queued, and send its response
+    """
+    if not claim(message["id"]):
+        return
+    try:
+        payload = _run_request(call, message)
+    except BaseException as e:
+        # Nobody checks the executor's future: whatever goes wrong, answer.
+        payload = json.dumps(_error_response(message["id"], e))
     reply(payload)
 
 
@@ -256,6 +281,16 @@ def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
     else:
         call = predictor.predict
 
+    # Requests submitted but not started yet, by id, and whether the caller
+    # cancelled them. A request that already started runs to the end: a thread
+    # cannot be interrupted.
+    queued: Dict[str, bool] = {}
+    queued_lock = threading.Lock()
+
+    def claim(request_id: str) -> bool:
+        with queued_lock:
+            return not queued.pop(request_id, False)
+
     executor = ThreadPoolExecutor(
         max_workers=spec.concurrency,
         thread_name_prefix=f"cogito-worker-{spec.name}",
@@ -268,8 +303,16 @@ def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
                 break
             if message == STOP_MESSAGE:
                 break
-            if isinstance(message, dict) and message.get("type") == PREDICT_MESSAGE:
-                executor.submit(_handle_request, call, message, reply)
+            if not isinstance(message, dict):
+                continue
+            if message.get("type") == PREDICT_MESSAGE:
+                with queued_lock:
+                    queued[message["id"]] = False
+                executor.submit(_handle_request, call, message, claim, reply)
+            elif message.get("type") == CANCEL_MESSAGE:
+                with queued_lock:
+                    if message.get("id") in queued:
+                        queued[message["id"]] = True
     finally:
         # Requests already running still get their response.
         executor.shutdown(wait=True)
@@ -296,6 +339,11 @@ class PredictorWorker:
         self.conn = conn
         self.handshake = handshake
         self._send_lock = threading.Lock()
+        # Requests are sent from this worker's own thread, never from a pool shared
+        # with other workers: a send blocked on a frozen worker only holds this one.
+        self._sender = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"cogito-ipc-{spec.name}-send"
+        )
         # Requests waiting for a response, by correlation id. The reader thread and
         # the callers' event loops both use it.
         self._pending: Dict[str, Tuple[asyncio.AbstractEventLoop, asyncio.Future]] = {}
@@ -346,19 +394,33 @@ class PredictorWorker:
         message = {"type": PREDICT_MESSAGE, "id": request_id, "inputs": inputs}
         # The send runs on its own and a failure is forwarded to the response
         # future, so the request only ever waits on that future: a worker exit
-        # fails it even while the send is still queued for an executor thread.
-        send = asyncio.ensure_future(asyncio.to_thread(self._send, message))
+        # fails it even while the send is still queued behind another one.
+        try:
+            send = loop.run_in_executor(self._sender, self._send, message)
+        except RuntimeError:
+            # The worker was stopped in the meantime.
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+            raise WorkerUnavailableError(name, "worker is not running") from None
         send.add_done_callback(functools.partial(_forward_send_failure, future, name))
+        abandoned = False
         try:
             try:
                 # One deadline for sending the request and waiting for its response.
                 response = await asyncio.wait_for(future, timeout)
             except asyncio.TimeoutError:
+                abandoned = True
                 raise WorkerTimeoutError(name, timeout) from None
+            except asyncio.CancelledError:
+                abandoned = True
+                raise
         finally:
-            # A send still queued never runs; one already running finishes in its
-            # thread and its late response, if any, is dropped by the reader.
+            # A send still queued never runs. One already sent is cancelled in the
+            # worker, which skips it unless it already started; a late response
+            # is dropped by the reader.
             send.cancel()
+            if abandoned and not send.cancelled():
+                self._send_in_background({"type": CANCEL_MESSAGE, "id": request_id})
             with self._pending_lock:
                 self._pending.pop(request_id, None)
 
@@ -372,10 +434,17 @@ class PredictorWorker:
         with self._send_lock:
             self.conn.send(message)
 
-    def _send_stop(self) -> None:
+    def _send_quietly(self, message: Any) -> None:
         try:
-            self._send(STOP_MESSAGE)
+            self._send(message)
         except (BrokenPipeError, OSError):
+            pass
+
+    def _send_in_background(self, message: Any) -> None:
+        try:
+            self._sender.submit(self._send_quietly, message)
+        except RuntimeError:
+            # The worker was stopped: there is nobody to tell.
             pass
 
     def _read_responses(self) -> None:
@@ -427,7 +496,9 @@ class PredictorWorker:
             # Sent from its own thread: a worker that stopped reading can block the
             # send (or another sender holding the lock), and _reap must still run.
             stopper = threading.Thread(
-                target=self._send_stop, name=f"cogito-stop-{self.spec.name}"
+                target=self._send_quietly,
+                args=(STOP_MESSAGE,),
+                name=f"cogito-stop-{self.spec.name}",
             )
             stopper.daemon = True
             stopper.start()
@@ -436,6 +507,7 @@ class PredictorWorker:
         # worker held the only other end of the pipe.
         if stopper is not None:
             stopper.join(timeout)
+        self._sender.shutdown(wait=False, cancel_futures=True)
         self._reader.join(timeout)
         self.conn.close()
 
