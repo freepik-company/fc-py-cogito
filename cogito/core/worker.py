@@ -136,6 +136,14 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     # keep the worker's pipes open after it is gone.
     if hasattr(os, "setpgrp"):
         os.setpgrp()
+    # The pipe only tells a worker reading requests that its gateway is gone. One
+    # loading its predictor, or draining requests after a stop, must notice too.
+    threading.Thread(
+        target=_watch_gateway,
+        args=(os.getppid(),),
+        name="cogito-worker-gateway-watch",
+        daemon=True,
+    ).start()
 
     # The worker already starts with this env (see _spawn_environ); applying it
     # again keeps it in place before the predictor import however it was started.
@@ -154,14 +162,18 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
         conn.close()
         sys.exit(1)
 
-    conn.send(
-        {
-            "status": "ready",
-            "pid": os.getpid(),
-            "env": {key: os.environ.get(key) for key in env},
-            "predictor": f"{type(predictor).__module__}.{type(predictor).__qualname__}",
-        }
-    )
+    try:
+        conn.send(
+            {
+                "status": "ready",
+                "pid": os.getpid(),
+                "env": {key: os.environ.get(key) for key in env},
+                "predictor": f"{type(predictor).__module__}.{type(predictor).__qualname__}",
+            }
+        )
+    except OSError:
+        # The gateway is gone already.
+        _exit_with_process_group()
 
     try:
         _serve(spec, predictor, conn)
@@ -184,6 +196,20 @@ def _stop_own_process_group() -> None:
     # The worker leads the group: it ignores the signal it sends to the rest.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     os.killpg(os.getpgrp(), signal.SIGTERM)
+
+
+def _watch_gateway(gateway_pid: int) -> None:
+    """
+    Exit with the process group as soon as the gateway is gone: the worker is then
+    adopted by another process.
+    """
+    while os.getppid() == gateway_pid:
+        time.sleep(_GATEWAY_CHECK_INTERVAL)
+    _exit_with_process_group()
+
+
+# How often a worker checks that its gateway is still alive.
+_GATEWAY_CHECK_INTERVAL = 1.0
 
 
 def _exit_with_process_group() -> None:
@@ -594,7 +620,7 @@ class PredictorWorker:
         """
         if self.process.is_alive():
             self.process.terminate()
-        self.process.join(timeout)
+        _join(self.process, timeout)
         if self.process.is_alive():
             self.process.kill()
             self.process.join()
@@ -638,14 +664,34 @@ def _set_future_exception(future: asyncio.Future, error: BaseException) -> None:
 
 
 def _reap(process: multiprocessing.process.BaseProcess, timeout: float) -> None:
-    process.join(timeout)
+    _join(process, timeout)
     if process.is_alive():
         process.terminate()
-        process.join(timeout)
+        _join(process, timeout)
     if process.is_alive():
         process.kill()
         process.join()
     _kill_process_group(process)
+
+
+def _join(process: multiprocessing.process.BaseProcess, timeout: float) -> None:
+    """
+    process.join(timeout), without relying on the process sentinel alone.
+
+    The sentinel is a pipe, and a process the predictor forked inherits it: it
+    stays open after the worker exited, and join() would wait the whole timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while process.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        wait([process.sentinel], min(remaining, _JOIN_POLL_INTERVAL))
+    process.join()
+
+
+# How often a join checks whether the process exited, besides its sentinel.
+_JOIN_POLL_INTERVAL = 0.05
 
 
 def _kill_process_group(process: multiprocessing.process.BaseProcess) -> None:
@@ -883,25 +929,30 @@ class SupervisedWorker:
                 raise WorkerStartError(
                     self.spec.name, "stopped while starting"
                 ) from None
-            with self._lock:
-                stopped = self._stopping.is_set()
-                if not stopped:
-                    monitor = threading.Thread(
-                        target=self._watch,
-                        args=(worker,),
-                        name=f"cogito-supervisor-{self.spec.name}",
-                        daemon=True,
-                    )
-                    try:
-                        monitor.start()
-                    except BaseException:
-                        # E.g. no threads left: nothing would watch or stop it.
-                        worker.terminate(timeout=1.0)
-                        raise
-                    self._worker = worker
-                    self._monitor = monitor
-            if stopped:
-                worker.terminate(timeout=1.0)
+            try:
+                with self._lock:
+                    if not self._stopping.is_set():
+                        monitor = threading.Thread(
+                            target=self._watch,
+                            args=(worker,),
+                            name=f"cogito-supervisor-{self.spec.name}",
+                            daemon=True,
+                        )
+                        # Published first, so that from here on stop() finds it.
+                        self._worker, self._monitor = worker, monitor
+                        try:
+                            monitor.start()
+                        except BaseException:
+                            self._worker, self._monitor = None, None
+                            raise
+            finally:
+                with self._lock:
+                    owned = self._worker is worker
+                if not owned:
+                    # Stopped meanwhile, or interrupted (no thread left, a signal
+                    # handler raising): nothing else would ever stop this worker.
+                    worker.terminate(timeout=1.0)
+            if not owned:
                 raise WorkerStartError(self.spec.name, "stopped while starting")
         finally:
             # stop() waits for this before it joins the monitor and closes the pipe

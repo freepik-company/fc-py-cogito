@@ -898,6 +898,29 @@ SUPERVISION_PREDICTORS = {
                     os._exit(0)
                 return helper
     """,
+    # Forks a helper while loading, writes both pids to COGITO_TEST_OUT, then takes
+    # a minute to load.
+    "cogito_slow_load_predictor": """
+        import json
+        import os
+        import time
+
+        helper = os.fork()
+        if helper == 0:
+            time.sleep(60)
+            os._exit(0)
+        with open(os.environ["COGITO_TEST_OUT"], "w") as out:
+            json.dump([os.getpid(), helper], out)
+        time.sleep(60)
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self) -> int:
+                return os.getpid()
+    """,
     # Fails to load while the file named by COGITO_TEST_MARKER exists, and loads
     # slowly while the one named by COGITO_TEST_SLOW exists.
     "cogito_flaky_predictor": """
@@ -924,7 +947,8 @@ SUPERVISION_PREDICTORS = {
 # worker is still blocked (also with a helper the worker forked holding the pipe);
 # waits for SIGTERM the way uvicorn does (a handler that
 # leaves the interpreter normally); or waits with a helper forked by a worker
-# that ignores SIGTERM and a prediction still running.
+# that ignores SIGTERM and a prediction still running; or does the same and then
+# stops, waiting for that prediction; or never finishes loading its predictor.
 SUPERVISOR_LAUNCHER = textwrap.dedent(
     """
     import asyncio
@@ -942,6 +966,13 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
         mode = sys.argv[2]
         if mode == "sigterm":
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        if mode == "loading":
+            # The predictor itself writes the pids, and never finishes loading.
+            os.environ["COGITO_TEST_OUT"] = sys.argv[1]
+            WorkerSupervisor(
+                [WorkerSpec(name="slow", class_path="cogito_slow_load_predictor:Predictor")],
+                start_timeout=600.0,
+            ).start()
         supervisor = WorkerSupervisor(
             [
                 WorkerSpec(name=name, class_path="cogito_helper_predictor:Predictor")
@@ -952,16 +983,16 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
         )
         supervisor.start()
         pids = [worker.pid for worker in supervisor]
-        if mode in ("blocked-helper", "wait"):
+        if mode in ("blocked-helper", "wait", "stopping"):
             # A helper the worker forked, which holds its end of the pipe as well.
             pids.append(
                 asyncio.run(
                     supervisor["first"].predict(
-                        {"spawn_helper": True, "ignore_sigterm": mode == "wait"}
+                        {"spawn_helper": True, "ignore_sigterm": mode != "blocked-helper"}
                     )
                 )
             )
-        if mode == "wait":
+        if mode in ("wait", "stopping"):
             # A prediction still running when the gateway goes away.
             threading.Thread(
                 target=asyncio.run,
@@ -983,6 +1014,9 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
                 pass
         with open(sys.argv[1], "w") as out:
             json.dump(pids, out)
+        if mode == "stopping":
+            # Waits for the running prediction: the gateway dies while draining.
+            supervisor.stop(timeout=600.0)
         if mode in ("sigterm", "wait"):
             while True:
                 time.sleep(0.1)
@@ -1633,7 +1667,11 @@ def test_stop_kills_the_processes_the_predictor_started(supervision_path, superv
     assert pid_exists(helper)
 
     try:
-        worker.stop(timeout=5.0)
+        started = time.monotonic()
+        worker.stop(timeout=30.0)
+        # The helper inherited the worker's sentinel: a join that only waited on it
+        # would take the whole timeout.
+        assert time.monotonic() - started < 10.0
 
         wait_until(lambda: not pid_exists(helper), timeout=10.0)
     finally:
@@ -1654,3 +1692,50 @@ def test_a_crashed_worker_leaves_no_forked_helper(supervision_path, supervised):
     finally:
         if pid_exists(helper):
             os.kill(helper, signal.SIGKILL)
+
+
+def test_no_process_is_left_when_the_gateway_dies_while_a_worker_loads(
+    supervision_path, launchers
+):
+    process, pids = run_supervisor_launcher(launchers, supervision_path, "loading")
+
+    process.kill()
+    process.wait(timeout=60)
+
+    wait_until(lambda: not any(pid_exists(pid) for pid in pids), timeout=15.0)
+
+
+def test_no_process_is_left_when_the_gateway_dies_while_stopping(
+    supervision_path, launchers
+):
+    process, pids = run_supervisor_launcher(launchers, supervision_path, "stopping")
+    # Let the launcher send STOP and start waiting for the running prediction.
+    time.sleep(1.0)
+
+    process.kill()
+    process.wait(timeout=60)
+
+    wait_until(lambda: not any(pid_exists(pid) for pid in pids), timeout=15.0)
+
+
+def test_a_start_interrupted_before_publishing_the_worker_terminates_it(
+    supervision_path, monkeypatch
+):
+    class Interrupted(threading.Thread):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("name", "").startswith("cogito-supervisor-"):
+                raise KeyboardInterrupt()
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(threading, "Thread", Interrupted)
+    worker = SupervisedWorker(
+        WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        worker.start()
+
+    assert worker.pid is None
+    assert not multiprocessing.active_children()
+    worker.stop(timeout=5.0)
