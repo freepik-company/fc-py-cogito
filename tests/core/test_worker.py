@@ -868,9 +868,11 @@ SUPERVISION_PREDICTORS = {
                     f.write(str(helper))
                 os._exit(3)
     """,
-    # Forks a helper that outlives the request and returns its pid.
+    # Forks a helper that outlives the request (optionally ignoring SIGTERM) and
+    # returns its pid; or sleeps for delay and returns the worker's pid.
     "cogito_helper_predictor": """
         import os
+        import signal
         import time
 
 
@@ -878,11 +880,20 @@ SUPERVISION_PREDICTORS = {
             def setup(self):
                 pass
 
-            def predict(self, spawn_helper: bool = False, padding: str = "") -> int:
+            def predict(
+                self,
+                spawn_helper: bool = False,
+                ignore_sigterm: bool = False,
+                delay: float = 0.0,
+                padding: str = "",
+            ) -> int:
                 if not spawn_helper:
+                    time.sleep(delay)
                     return os.getpid()
                 helper = os.fork()
                 if helper == 0:
+                    if ignore_sigterm:
+                        signal.signal(signal.SIGTERM, signal.SIG_IGN)
                     time.sleep(60)
                     os._exit(0)
                 return helper
@@ -912,7 +923,8 @@ SUPERVISION_PREDICTORS = {
 # on argv[2]: returns without stopping them; returns while a send to a frozen
 # worker is still blocked (also with a helper the worker forked holding the pipe);
 # waits for SIGTERM the way uvicorn does (a handler that
-# leaves the interpreter normally); or waits with a helper forked by a worker.
+# leaves the interpreter normally); or waits with a helper forked by a worker
+# that ignores SIGTERM and a prediction still running.
 SUPERVISOR_LAUNCHER = textwrap.dedent(
     """
     import asyncio
@@ -920,6 +932,7 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
     import os
     import signal
     import sys
+    import threading
     import time
 
     from cogito.core.exceptions import WorkerTimeoutError
@@ -942,8 +955,20 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
         if mode in ("blocked-helper", "wait"):
             # A helper the worker forked, which holds its end of the pipe as well.
             pids.append(
-                asyncio.run(supervisor["first"].predict({"spawn_helper": True}))
+                asyncio.run(
+                    supervisor["first"].predict(
+                        {"spawn_helper": True, "ignore_sigterm": mode == "wait"}
+                    )
+                )
             )
+        if mode == "wait":
+            # A prediction still running when the gateway goes away.
+            threading.Thread(
+                target=asyncio.run,
+                args=(supervisor["second"].predict({"delay": 60.0}),),
+                daemon=True,
+            ).start()
+            time.sleep(0.5)
         if mode.startswith("blocked"):
             # A frozen worker stops reading, so a large request fills the pipe and
             # its send stays blocked after the request times out.

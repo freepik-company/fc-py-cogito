@@ -163,7 +163,11 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
         }
     )
 
-    _serve(spec, predictor, conn)
+    try:
+        _serve(spec, predictor, conn)
+    except BaseException:
+        _logger.critical("Worker loop failed", exc_info=True)
+        _exit_with_process_group()
     conn.close()
     _stop_own_process_group()
 
@@ -180,6 +184,20 @@ def _stop_own_process_group() -> None:
     # The worker leads the group: it ignores the signal it sends to the rest.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     os.killpg(os.getpgrp(), signal.SIGTERM)
+
+
+def _exit_with_process_group() -> None:
+    """
+    Exit at once, together with every process the predictor started.
+
+    For a worker whose gateway is gone: nobody can receive the responses of the
+    requests still running, and nobody is left to stop what keeps running, so
+    neither the requests nor processes that ignore SIGTERM are waited for.
+    """
+    if hasattr(os, "killpg") and os.getpgrp() == os.getpid():
+        # This worker included.
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    os._exit(1)
 
 
 class _EventLoopThread:
@@ -338,8 +356,10 @@ def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
         while True:
             try:
                 message = conn.recv()
-            except EOFError:
-                break
+            except (EOFError, OSError):
+                # The gateway is gone, maybe halfway through a message: only an
+                # explicit stop drains the requests still running.
+                _exit_with_process_group()
             if message == STOP_MESSAGE:
                 break
             if not isinstance(message, dict):
