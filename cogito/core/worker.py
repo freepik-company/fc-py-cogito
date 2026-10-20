@@ -165,6 +165,21 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
 
     _serve(spec, predictor, conn)
     conn.close()
+    _stop_own_process_group()
+
+
+def _stop_own_process_group() -> None:
+    """
+    Stop the processes the predictor started, before the worker exits.
+
+    The gateway does it once it reaps the worker, but a gateway that was killed
+    never will: only the worker, seeing its pipe close, knows it must clean up.
+    """
+    if not hasattr(os, "killpg") or os.getpgrp() != os.getpid():
+        return
+    # The worker leads the group: it ignores the signal it sends to the rest.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.killpg(os.getpgrp(), signal.SIGTERM)
 
 
 class _EventLoopThread:

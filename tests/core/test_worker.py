@@ -912,7 +912,7 @@ SUPERVISION_PREDICTORS = {
 # on argv[2]: returns without stopping them; returns while a send to a frozen
 # worker is still blocked (also with a helper the worker forked holding the pipe);
 # waits for SIGTERM the way uvicorn does (a handler that
-# leaves the interpreter normally); or just waits.
+# leaves the interpreter normally); or waits with a helper forked by a worker.
 SUPERVISOR_LAUNCHER = textwrap.dedent(
     """
     import asyncio
@@ -939,8 +939,8 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
         )
         supervisor.start()
         pids = [worker.pid for worker in supervisor]
-        if mode == "blocked-helper":
-            # The helper holds the frozen worker's end of the pipe as well.
+        if mode in ("blocked-helper", "wait"):
+            # A helper the worker forked, which holds its end of the pipe as well.
             pids.append(
                 asyncio.run(supervisor["first"].predict({"spawn_helper": True}))
             )
@@ -1408,8 +1408,9 @@ def test_workers_exit_when_the_gateway_is_killed(supervision_path, launchers):
     process.kill()
     process.wait(timeout=60)
 
-    # Their parent is gone: whoever adopts them reaps them once they exit.
-    wait_until(lambda: not any(pid_exists(pid) for pid in pids))
+    # Their parent is gone: whoever adopts them reaps them once they exit. Well
+    # before the helper (the last pid) would exit on its own after 60s.
+    wait_until(lambda: not any(pid_exists(pid) for pid in pids), timeout=15.0)
 
 
 def test_unavailable_worker_surfaces_as_503_with_a_clear_message(
