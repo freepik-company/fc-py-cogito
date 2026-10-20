@@ -1304,6 +1304,11 @@ def test_no_worker_is_left_when_the_gateway_returns_without_stopping(
 
 
 def test_no_worker_is_left_when_exiting_with_a_send_still_blocked(supervision_path):
+    # Without it the exit hook falls back to atexit, which runs too late for this
+    # case: fail clearly instead of by a timeout.
+    assert hasattr(
+        threading, "_register_atexit"
+    ), "threading._register_atexit is gone: exit with a blocked send would hang"
     process, pids = run_supervisor_launcher(supervision_path, "blocked")
 
     assert process.wait(timeout=60) == 0
@@ -1372,3 +1377,23 @@ def test_an_unexpected_error_while_restarting_is_retried(
 
     wait_until(lambda: worker.restarts == 1 and worker.is_available())
     assert len(calls) == 3
+
+
+def test_exit_hook_falls_back_to_atexit_with_a_warning(monkeypatch, caplog):
+    import atexit
+
+    import cogito.core.worker as worker_module
+
+    registered = []
+    monkeypatch.delattr(threading, "_register_atexit")
+    monkeypatch.setattr(atexit, "register", registered.append)
+    monkeypatch.setattr(worker_module, "_EXIT_HOOK_REGISTERED", False)
+    caplog.set_level(logging.WARNING, logger="cogito.core.worker")
+
+    worker_module._register_exit_hook()
+
+    assert registered == [worker_module._terminate_running_supervisors]
+    assert any(
+        "threading._register_atexit is not available" in record.getMessage()
+        for record in caplog.records
+    )

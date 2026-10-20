@@ -1062,7 +1062,20 @@ def _register_exit_hook() -> None:
     with _RUNNING_LOCK:
         if _EXIT_HOOK_REGISTERED:
             return
-        register = getattr(threading, "_register_atexit", atexit.register)
+        # threading._register_atexit is private CPython API (3.9+). Its hooks run
+        # inside threading._shutdown, before it joins the non-daemon threads,
+        # ThreadPoolExecutor's senders among them. A plain atexit hook only runs
+        # after that join: with a send blocked on a frozen worker, exit would hang
+        # before ever reaching it. The fallback still covers idle workers, so it
+        # is kept, but it is not silent.
+        register = getattr(threading, "_register_atexit", None)
+        if register is None:
+            _logger.warning(
+                "threading._register_atexit is not available: workers are stopped "
+                "from atexit, and exit may hang while a send to a frozen worker "
+                "is blocked"
+            )
+            register = atexit.register
         register(_terminate_running_supervisors)
         _EXIT_HOOK_REGISTERED = True
 
