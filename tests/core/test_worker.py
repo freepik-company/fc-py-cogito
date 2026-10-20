@@ -340,6 +340,44 @@ IPC_PREDICTORS = {
                 await asyncio.sleep(delay)
                 return value * 2
     """,
+    "cogito_exit_predictor": """
+        import sys
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, value: int) -> int:
+                if value < 0:
+                    sys.exit("negative value")
+                return value
+    """,
+    "cogito_async_exit_predictor": """
+        import sys
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            async def predict(self, value: int) -> int:
+                if value < 0:
+                    sys.exit("negative value")
+                return value
+    """,
+    "cogito_foreign_bad_request_predictor": """
+        class BadRequestError(Exception):
+            pass
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self):
+                raise BadRequestError("not cogito's")
+    """,
     "cogito_subclass_predictor": """
         class Score(float):
             pass
@@ -558,12 +596,49 @@ def test_a_frozen_worker_times_out_and_still_stops(ipc_predictors_path):
     padding = "x" * (16 * 1024 * 1024)
 
     async def run():
-        with pytest.raises(WorkerTimeoutError):
-            await worker.predict({"value": 1, "padding": padding}, timeout=0.5)
-        # The send is still blocked here, holding the send lock: stop() must not
-        # wait for it. Killing the worker then fails the blocked send.
-        await asyncio.to_thread(worker.stop, 1.0)
+        try:
+            with pytest.raises(WorkerTimeoutError):
+                await worker.predict({"value": 1, "padding": padding}, timeout=0.5)
+        finally:
+            # The send is still blocked here, holding the send lock: stop() must not
+            # wait for it. Killing the worker then fails the blocked send, so this
+            # runs before asyncio.run waits for the sender thread.
+            await asyncio.to_thread(worker.stop, 1.0)
 
     asyncio.run(asyncio.wait_for(run(), 30.0))
 
     assert not worker.is_alive()
+
+
+@pytest.mark.parametrize(
+    "module", ["cogito_exit_predictor", "cogito_async_exit_predictor"]
+)
+def test_system_exit_in_the_predictor_answers_the_request(
+    ipc_predictors_path, workers, module
+):
+    worker = start(workers, "exit", module)
+
+    async def run():
+        with pytest.raises(WorkerPredictionError) as error:
+            await worker.predict({"value": -1}, timeout=30.0)
+        # The worker keeps serving requests afterwards.
+        return error.value, await worker.predict({"value": 4}, timeout=30.0)
+
+    error, result = asyncio.run(run())
+
+    assert error.message == "negative value"
+    assert "SystemExit: negative value" in error.traceback
+    assert result == 4
+    assert worker.is_alive()
+
+
+def test_a_foreign_bad_request_error_is_a_prediction_error(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "foreign", "cogito_foreign_bad_request_predictor")
+
+    with pytest.raises(WorkerPredictionError) as error:
+        asyncio.run(worker.predict({}))
+
+    assert not isinstance(error.value, BadRequestError)
+    assert error.value.message == "not cogito's"

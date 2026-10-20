@@ -45,6 +45,15 @@ STOP_MESSAGE = "stop"
 PREDICT_MESSAGE = "predict"
 RESULT_MESSAGE = "result"
 
+
+def _qualified_name(cls: type) -> str:
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+# error_type is the qualified name of the exception class, so an unrelated
+# exception that happens to be called BadRequestError is not taken for cogito's.
+BAD_REQUEST_ERROR_TYPE = _qualified_name(BadRequestError)
+
 _logger = logging.getLogger(__name__)
 
 # Serialises the temporary changes to os.environ made while a worker starts.
@@ -144,12 +153,30 @@ class _EventLoopThread:
         self.thread.start()
 
     def run(self, coroutine) -> Any:
-        return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result()
+        failed, value = asyncio.run_coroutine_threadsafe(
+            _capture(coroutine), self.loop
+        ).result()
+        if failed:
+            raise value
+        return value
 
     def close(self) -> None:
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join()
         self.loop.close()
+
+
+async def _capture(coroutine) -> Tuple[bool, Any]:
+    """
+    Await coroutine, returning what it raised instead of raising it.
+
+    A BaseException such as SystemExit escaping a task would stop the event loop
+    and leave the request waiting forever.
+    """
+    try:
+        return False, await coroutine
+    except BaseException as e:
+        return True, e
 
 
 def _handle_request(
@@ -163,11 +190,15 @@ def _handle_request(
     response = {"type": RESULT_MESSAGE, "id": message["id"]}
     try:
         result = jsonable_encoder(call(**message["inputs"]))
-    except Exception as e:
+    except BaseException as e:
+        # BaseException too: a SystemExit lost in the executor's future would leave
+        # the request without a response.
         is_bad_request = isinstance(e, BadRequestError)
         response.update(
             status="error",
-            error_type="BadRequestError" if is_bad_request else type(e).__name__,
+            error_type=(
+                BAD_REQUEST_ERROR_TYPE if is_bad_request else _qualified_name(type(e))
+            ),
             message=e.message if is_bad_request else str(e),
             traceback=traceback.format_exc(),
         )
@@ -316,7 +347,7 @@ class PredictorWorker:
 
         if response["status"] == "ok":
             return response["result"]
-        if response["error_type"] == "BadRequestError":
+        if response["error_type"] == BAD_REQUEST_ERROR_TYPE:
             raise BadRequestError(response["message"])
         raise WorkerPredictionError(name, response["message"], response["traceback"])
 
