@@ -898,6 +898,27 @@ SUPERVISION_PREDICTORS = {
                     os._exit(0)
                 return helper
     """,
+    # Sends the start of a message on its handshake pipe, then freezes while
+    # loading: the gateway sees a handshake that never finishes arriving.
+    "cogito_partial_handshake_predictor": """
+        import gc
+        import os
+        import struct
+        import time
+        from multiprocessing.connection import Connection
+
+        conn = next(o for o in gc.get_objects() if isinstance(o, Connection))
+        os.write(conn.fileno(), struct.pack("!i", 1024 * 1024) + b"partial")
+        time.sleep(600)
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self) -> int:
+                return 0
+    """,
     # Forks a helper while loading, writes both pids to COGITO_TEST_OUT, then takes
     # a minute to load.
     "cogito_slow_load_predictor": """
@@ -948,7 +969,8 @@ SUPERVISION_PREDICTORS = {
 # waits for SIGTERM the way uvicorn does (a handler that
 # leaves the interpreter normally); or waits with a helper forked by a worker
 # that ignores SIGTERM and a prediction still running; or does the same and then
-# stops, waiting for that prediction; or never finishes loading its predictor.
+# stops, waiting for that prediction; or never finishes loading its predictor
+# (also after a slow worker bootstrap, during which the gateway dies).
 SUPERVISOR_LAUNCHER = textwrap.dedent(
     """
     import asyncio
@@ -962,11 +984,20 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
     from cogito.core.exceptions import WorkerTimeoutError
     from cogito.core.worker import WorkerSpec, WorkerSupervisor
 
+    if __name__ == "__mp_main__" and os.environ.get("COGITO_TEST_BOOT"):
+        # Every worker re-imports this module while it bootstraps, before its
+        # entry point runs: the gateway dies meanwhile.
+        with open(os.environ["COGITO_TEST_BOOT"], "w") as out:
+            out.write(str(os.getpid()))
+        time.sleep(3)
+
     if __name__ == "__main__":
         mode = sys.argv[2]
         if mode == "sigterm":
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-        if mode == "loading":
+        if mode == "bootstrap":
+            os.environ["COGITO_TEST_BOOT"] = sys.argv[1] + ".boot"
+        if mode in ("loading", "bootstrap"):
             # The predictor itself writes the pids, and never finishes loading.
             os.environ["COGITO_TEST_OUT"] = sys.argv[1]
             WorkerSupervisor(
@@ -1739,3 +1770,69 @@ def test_a_start_interrupted_before_publishing_the_worker_terminates_it(
     assert worker.pid is None
     assert not multiprocessing.active_children()
     worker.stop(timeout=5.0)
+
+
+def test_no_process_is_left_when_the_gateway_dies_while_a_worker_bootstraps(
+    supervision_path, launchers
+):
+    launcher = supervision_path / "supervisor_launcher.py"
+    launcher.write_text(SUPERVISOR_LAUNCHER)
+    out = supervision_path / "pids.json"
+    boot = supervision_path / "pids.json.boot"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(supervision_path), env.get("PYTHONPATH")])
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(launcher), str(out), "bootstrap"], env=env
+    )
+    launchers.append((process, []))
+    wait_until(lambda: boot.exists() and boot.read_text())
+
+    worker = int(boot.read_text())
+    launchers[-1] = (process, [worker])
+
+    process.kill()
+    process.wait(timeout=60)
+
+    # Its gateway is gone before it even runs: it must not go on loading its
+    # predictor, which would take a minute.
+    wait_until(lambda: not pid_exists(worker), timeout=15.0)
+    assert not out.exists()
+
+
+PARTIAL_HANDSHAKE = WorkerSpec(
+    name="partial", class_path="cogito_partial_handshake_predictor:Predictor"
+)
+
+
+def test_stop_abandons_a_start_frozen_halfway_through_its_handshake(
+    supervision_path,
+):
+    worker = SupervisedWorker(PARTIAL_HANDSHAKE, start_timeout=600.0)
+    errors = []
+
+    def start():
+        try:
+            worker.start()
+        except WorkerStartError as error:
+            errors.append(error)
+
+    starter = threading.Thread(target=start)
+    starter.start()
+    # The partial handshake is now blocking the start's recv().
+    time.sleep(2.0)
+    worker.stop(timeout=5.0)
+    starter.join(20.0)
+
+    assert not starter.is_alive()
+    assert [error.detail for error in errors] == ["stopped while starting"]
+    assert not multiprocessing.active_children()
+
+
+def test_a_handshake_frozen_halfway_still_times_out(supervision_path):
+    with pytest.raises(WorkerStartError) as error:
+        spawn_worker(PARTIAL_HANDSHAKE, start_timeout=3.0)
+
+    assert error.value.detail == "predictor not loaded after 3.0s"
+    assert not multiprocessing.active_children()

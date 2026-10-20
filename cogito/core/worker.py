@@ -138,9 +138,12 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
         os.setpgrp()
     # The pipe only tells a worker reading requests that its gateway is gone. One
     # loading its predictor, or draining requests after a stop, must notice too.
+    # The pid multiprocessing recorded at spawn: os.getppid() would already be the
+    # adopter if the gateway died while this worker bootstrapped.
+    gateway = multiprocessing.parent_process()
     threading.Thread(
         target=_watch_gateway,
-        args=(os.getppid(),),
+        args=(gateway.pid if gateway is not None else os.getppid(),),
         name="cogito-worker-gateway-watch",
         daemon=True,
     ).start()
@@ -773,6 +776,7 @@ def _spawn(
     child_conn.close()
 
     try:
+        deadline = time.monotonic() + start_timeout
         ready = wait(
             [parent_conn] + ([abort] if abort is not None else []), start_timeout
         )
@@ -782,7 +786,9 @@ def _spawn(
             raise WorkerStartError(
                 spec.name, f"predictor not loaded after {start_timeout}s"
             )
-        handshake = parent_conn.recv()
+        handshake = _recv_handshake(
+            spec, parent_conn, process, abort, deadline, start_timeout
+        )
     except EOFError:
         _reap(process, timeout=10.0)
         parent_conn.close()
@@ -811,6 +817,59 @@ def _spawn(
         _reap(process, timeout=0)
         parent_conn.close()
         raise
+
+
+def _recv_handshake(
+    spec: WorkerSpec,
+    conn: Connection,
+    process: multiprocessing.process.BaseProcess,
+    abort: Optional[Connection],
+    deadline: float,
+    start_timeout: float,
+) -> Any:
+    """
+    conn.recv(), still giving up on abort or at the deadline.
+
+    wait() only says that the handshake started to arrive: a worker that froze
+    halfway through sending it would block recv() for good. A guard kills it in
+    that case, so recv() sees EOF.
+    """
+    done_reader, done_writer = _MP_CONTEXT.Pipe(duplex=False)
+    outcome: List[str] = []
+
+    def guard() -> None:
+        remaining = max(deadline - time.monotonic(), 0)
+        ready = wait([done_reader] + ([abort] if abort is not None else []), remaining)
+        if done_reader not in ready:
+            outcome.append("aborted" if ready else "timed out")
+            process.kill()
+
+    thread = threading.Thread(
+        target=guard, name=f"cogito-handshake-{spec.name}", daemon=True
+    )
+    thread.start()
+    try:
+        try:
+            handshake = conn.recv()
+        except (EOFError, OSError):
+            # OSError when the worker died halfway through the message.
+            handshake = None
+    finally:
+        done_writer.send(None)
+        thread.join()
+        done_writer.close()
+        done_reader.close()
+    # Decided after the guard is done: it may have killed the worker right after
+    # a complete handshake arrived.
+    if outcome == ["aborted"]:
+        raise _SpawnAborted()
+    if outcome:
+        raise WorkerStartError(
+            spec.name, f"predictor not loaded after {start_timeout}s"
+        )
+    if handshake is None:
+        raise EOFError
+    return handshake
 
 
 @dataclass(frozen=True)
