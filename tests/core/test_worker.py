@@ -1281,7 +1281,22 @@ def test_supervisor_stops_every_worker(supervision_path):
     assert not multiprocessing.active_children()
 
 
-def run_supervisor_launcher(path, mode):
+@pytest.fixture
+def launchers():
+    """Kill every launcher and its workers, even when the test fails."""
+    started = []
+    yield started
+    for process, pids in started:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for pid in pids:
+            # A frozen worker never sees its pipe close.
+            if pid_exists(pid):
+                os.kill(pid, signal.SIGKILL)
+
+
+def run_supervisor_launcher(launchers, path, mode):
     launcher = path / "supervisor_launcher.py"
     launcher.write_text(SUPERVISOR_LAUNCHER)
     out = path / "pids.json"
@@ -1290,33 +1305,38 @@ def run_supervisor_launcher(path, mode):
         filter(None, [str(path), env.get("PYTHONPATH")])
     )
     process = subprocess.Popen([sys.executable, str(launcher), str(out), mode], env=env)
+    launchers.append((process, []))
     wait_until(lambda: out.exists() and out.read_text())
-    return process, json.loads(out.read_text())
+    pids = json.loads(out.read_text())
+    launchers[-1] = (process, pids)
+    return process, pids
 
 
 def test_no_worker_is_left_when_the_gateway_returns_without_stopping(
-    supervision_path,
+    supervision_path, launchers
 ):
-    process, pids = run_supervisor_launcher(supervision_path, "return")
+    process, pids = run_supervisor_launcher(launchers, supervision_path, "return")
 
     assert process.wait(timeout=60) == 0
     assert not any(pid_exists(pid) for pid in pids)
 
 
-def test_no_worker_is_left_when_exiting_with_a_send_still_blocked(supervision_path):
+def test_no_worker_is_left_when_exiting_with_a_send_still_blocked(
+    supervision_path, launchers
+):
     # Without it the exit hook falls back to atexit, which runs too late for this
     # case: fail clearly instead of by a timeout.
     assert hasattr(
         threading, "_register_atexit"
     ), "threading._register_atexit is gone: exit with a blocked send would hang"
-    process, pids = run_supervisor_launcher(supervision_path, "blocked")
+    process, pids = run_supervisor_launcher(launchers, supervision_path, "blocked")
 
     assert process.wait(timeout=60) == 0
     assert not any(pid_exists(pid) for pid in pids)
 
 
-def test_no_worker_is_left_after_sigterm(supervision_path):
-    process, pids = run_supervisor_launcher(supervision_path, "sigterm")
+def test_no_worker_is_left_after_sigterm(supervision_path, launchers):
+    process, pids = run_supervisor_launcher(launchers, supervision_path, "sigterm")
     assert all(pid_exists(pid) for pid in pids)
 
     process.send_signal(signal.SIGTERM)
@@ -1325,8 +1345,8 @@ def test_no_worker_is_left_after_sigterm(supervision_path):
     assert not any(pid_exists(pid) for pid in pids)
 
 
-def test_workers_exit_when_the_gateway_is_killed(supervision_path):
-    process, pids = run_supervisor_launcher(supervision_path, "wait")
+def test_workers_exit_when_the_gateway_is_killed(supervision_path, launchers):
+    process, pids = run_supervisor_launcher(launchers, supervision_path, "wait")
 
     process.kill()
     process.wait(timeout=60)
@@ -1397,3 +1417,22 @@ def test_exit_hook_falls_back_to_atexit_with_a_warning(monkeypatch, caplog):
         "threading._register_atexit is not available" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_a_worker_that_cannot_be_tracked_after_its_handshake_is_reaped(
+    supervision_path, monkeypatch
+):
+    import cogito.core.worker as worker_module
+
+    def broken_handle(*args, **kwargs):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(worker_module, "PredictorWorker", broken_handle)
+
+    with pytest.raises(RuntimeError):
+        spawn_worker(
+            WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor"),
+            start_timeout=60.0,
+        )
+
+    assert not multiprocessing.active_children()

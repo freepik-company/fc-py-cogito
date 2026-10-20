@@ -686,7 +686,14 @@ def _spawn(
         parent_conn.close()
         raise WorkerStartError(spec.name, handshake.get("error", "unknown error"))
 
-    return PredictorWorker(spec, env, process, parent_conn, handshake)
+    try:
+        return PredictorWorker(spec, env, process, parent_conn, handshake)
+    except BaseException:
+        # Nothing tracks the process yet: a supervisor retrying the start would
+        # pile up live workers that neither stop() nor the exit hook can see.
+        _reap(process, timeout=0)
+        parent_conn.close()
+        raise
 
 
 @dataclass(frozen=True)
