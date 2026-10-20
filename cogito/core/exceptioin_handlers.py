@@ -7,6 +7,7 @@ from cogito.core.exceptions import (
     BadRequestError,
     NoThreadsAvailableError,
     WorkerTimeoutError,
+    WorkerUnavailableError,
 )
 
 
@@ -54,5 +55,14 @@ async def worker_timeout_exception_handler(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        content=jsonable_encoder({"detail": str(exc)}),
+    )
+
+
+async def worker_unavailable_exception_handler(
+    request: Request, exc: WorkerUnavailableError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         content=jsonable_encoder({"detail": str(exc)}),
     )

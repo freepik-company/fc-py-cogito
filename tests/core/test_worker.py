@@ -1,18 +1,24 @@
 import asyncio
 import concurrent.futures
 import json
+import logging
+import multiprocessing
 import os
 import signal
 import subprocess
 import sys
 import textwrap
 import threading
+import time
 from types import MappingProxyType
 
 import pytest
 from pydantic import BaseModel
 
-from cogito.core.exceptioin_handlers import worker_timeout_exception_handler
+from cogito.core.exceptioin_handlers import (
+    worker_timeout_exception_handler,
+    worker_unavailable_exception_handler,
+)
 from cogito.core.exceptions import (
     BadRequestError,
     WorkerPredictionError,
@@ -20,7 +26,14 @@ from cogito.core.exceptions import (
     WorkerTimeoutError,
     WorkerUnavailableError,
 )
-from cogito.core.worker import WorkerSpec, build_worker_env, spawn_worker
+from cogito.core.worker import (
+    RestartPolicy,
+    SupervisedWorker,
+    WorkerSpec,
+    WorkerSupervisor,
+    build_worker_env,
+    spawn_worker,
+)
 
 TOY_PREDICTOR = textwrap.dedent(
     """
@@ -815,3 +828,493 @@ def test_a_request_abandoned_while_its_send_is_running_is_still_cancelled(
     assert (first, third) == (1, 3)
     # The abandoned 5s request was skipped by the worker.
     assert waited < 3.0
+
+
+# Predictors for the supervision tests. Like the ones above, the parent never
+# imports them.
+SUPERVISION_PREDICTORS = {
+    "cogito_crashy_predictor": """
+        import os
+        import time
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, crash: bool = False, delay: float = 0.0) -> int:
+                time.sleep(delay)
+                if crash:
+                    os._exit(3)
+                return os.getpid()
+    """,
+    # Fails to load while the file named by COGITO_TEST_MARKER exists, and loads
+    # slowly while the one named by COGITO_TEST_SLOW exists.
+    "cogito_flaky_predictor": """
+        import os
+        import time
+
+        if os.path.exists(os.environ.get("COGITO_TEST_MARKER", "")):
+            raise RuntimeError("cannot load right now")
+        if os.path.exists(os.environ.get("COGITO_TEST_SLOW", "")):
+            time.sleep(60)
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self) -> int:
+                return os.getpid()
+    """,
+}
+
+# Starts the supervised workers, writes their pids to argv[1] and then, depending
+# on argv[2], returns without stopping them, waits for SIGTERM the way uvicorn
+# does (a handler that leaves the interpreter normally), or just waits.
+SUPERVISOR_LAUNCHER = textwrap.dedent(
+    """
+    import json
+    import signal
+    import sys
+    import time
+
+    from cogito.core.worker import WorkerSpec, WorkerSupervisor
+
+    if __name__ == "__main__":
+        supervisor = WorkerSupervisor(
+            [
+                WorkerSpec(name=name, class_path="cogito_crashy_predictor:Predictor")
+                for name in ("first", "second")
+            ],
+            start_timeout=60.0,
+        )
+        supervisor.start()
+        with open(sys.argv[1], "w") as out:
+            json.dump([worker.pid for worker in supervisor], out)
+        if sys.argv[2] == "sigterm":
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        if sys.argv[2] != "return":
+            while True:
+                time.sleep(0.1)
+    """
+)
+
+FAST_RESTARTS = RestartPolicy(initial_delay=0.01, max_delay=0.05, reset_after=60.0)
+
+
+@pytest.fixture
+def supervision_path(ipc_predictors_path):
+    for module, source in SUPERVISION_PREDICTORS.items():
+        (ipc_predictors_path / f"{module}.py").write_text(textwrap.dedent(source))
+    return ipc_predictors_path
+
+
+@pytest.fixture
+def supervised():
+    """Stop every supervised worker, even when the test fails."""
+    started = []
+    yield started
+    for worker in started:
+        worker.stop(timeout=5.0)
+
+
+def supervise(supervised, name, module, policy=FAST_RESTARTS, **spec_args):
+    worker = SupervisedWorker(
+        WorkerSpec(name=name, class_path=f"{module}:Predictor", **spec_args),
+        policy=policy,
+        start_timeout=60.0,
+    )
+    supervised.append(worker)
+    worker.start()
+    return worker
+
+
+def wait_until(condition, timeout=60.0):
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() > deadline:
+            raise AssertionError("condition not met in time")
+        time.sleep(0.02)
+
+
+def pid_exists(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def restart_delays(caplog, name):
+    return [
+        record.delay
+        for record in caplog.records
+        if record.getMessage() == "Restarting worker" and record.predictor == name
+    ]
+
+
+def test_restart_delay_grows_exponentially_up_to_the_cap():
+    policy = RestartPolicy(initial_delay=1.0, multiplier=2.0, max_delay=10.0)
+
+    assert [policy.delay(attempt) for attempt in range(6)] == [1, 2, 4, 8, 10, 10]
+    assert policy.delay(10_000) == 10.0
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"initial_delay": -1},
+        {"initial_delay": 5, "max_delay": 1},
+        {"multiplier": 0.5},
+        {"reset_after": -1},
+        {"max_restarts": -1},
+    ],
+)
+def test_restart_policy_rejects_invalid_values(options):
+    with pytest.raises(ValueError):
+        RestartPolicy(**options)
+
+
+def test_a_crashed_worker_fails_its_request_and_is_restarted(
+    supervision_path, supervised
+):
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
+    first_pid = worker.pid
+
+    with pytest.raises(WorkerUnavailableError):
+        asyncio.run(worker.predict({"crash": True}, timeout=30.0))
+
+    wait_until(lambda: worker.restarts == 1 and worker.is_available())
+    assert worker.pid != first_pid
+    assert asyncio.run(worker.predict({}, timeout=30.0)) == worker.pid
+
+
+def test_a_killed_worker_is_restarted(supervision_path, supervised):
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
+    first_pid = worker.pid
+
+    os.kill(first_pid, signal.SIGKILL)
+
+    wait_until(lambda: worker.restarts == 1 and worker.is_available())
+    assert worker.pid != first_pid
+    assert not pid_exists(first_pid)
+
+
+def test_every_request_in_flight_fails_when_the_worker_crashes(
+    supervision_path, supervised
+):
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor", concurrency=4)
+
+    async def run():
+        return await asyncio.gather(
+            *(worker.predict({"delay": 0.5}, timeout=30.0) for _ in range(3)),
+            worker.predict({"crash": True, "delay": 0.1}, timeout=30.0),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(run())
+
+    assert all(isinstance(result, WorkerUnavailableError) for result in results)
+
+
+def test_requests_fail_at_once_while_the_worker_restarts(supervision_path, supervised):
+    worker = supervise(
+        supervised,
+        "crashy",
+        "cogito_crashy_predictor",
+        policy=RestartPolicy(initial_delay=60.0, max_delay=60.0),
+    )
+
+    with pytest.raises(WorkerUnavailableError):
+        asyncio.run(worker.predict({"crash": True}, timeout=30.0))
+    wait_until(lambda: worker.pid is None)
+
+    async def run():
+        # Bounded, so a request that waits for the restart fails the test.
+        return await asyncio.wait_for(worker.predict({}), timeout=5.0)
+
+    with pytest.raises(WorkerUnavailableError) as error:
+        asyncio.run(run())
+    assert error.value.detail == "worker is restarting"
+
+
+def test_failed_restarts_back_off_until_the_worker_loads(
+    supervision_path, supervised, caplog, monkeypatch
+):
+    marker = supervision_path / "broken"
+    monkeypatch.setenv("COGITO_TEST_MARKER", str(marker))
+    caplog.set_level(logging.WARNING, logger="cogito.core.worker")
+    worker = supervise(
+        supervised,
+        "flaky",
+        "cogito_flaky_predictor",
+        policy=RestartPolicy(initial_delay=0.01, multiplier=2.0, max_delay=1.0),
+    )
+    first_pid = worker.pid
+
+    marker.touch()
+    os.kill(first_pid, signal.SIGKILL)
+    wait_until(lambda: len(restart_delays(caplog, "flaky")) >= 4)
+    marker.unlink()
+
+    wait_until(lambda: worker.is_available())
+    delays = restart_delays(caplog, "flaky")
+    assert delays[:4] == [0.01, 0.02, 0.04, 0.08]
+    assert worker.restarts == 1
+    assert any(
+        record.getMessage() == "Unable to restart worker" for record in caplog.records
+    )
+
+
+def test_backoff_starts_again_after_a_stable_uptime(
+    supervision_path, supervised, caplog
+):
+    caplog.set_level(logging.WARNING, logger="cogito.core.worker")
+    worker = supervise(
+        supervised,
+        "crashy",
+        "cogito_crashy_predictor",
+        policy=RestartPolicy(initial_delay=0.01, max_delay=1.0, reset_after=0.0),
+    )
+
+    for restarts in (1, 2):
+        os.kill(worker.pid, signal.SIGKILL)
+        wait_until(lambda: worker.restarts == restarts and worker.is_available())
+
+    assert restart_delays(caplog, "crashy") == [0.01, 0.01]
+
+
+def test_backoff_keeps_growing_for_a_worker_that_crashes_right_away(
+    supervision_path, supervised, caplog
+):
+    caplog.set_level(logging.WARNING, logger="cogito.core.worker")
+    worker = supervise(
+        supervised,
+        "crashy",
+        "cogito_crashy_predictor",
+        policy=RestartPolicy(initial_delay=0.01, max_delay=1.0, reset_after=60.0),
+    )
+
+    for restarts in (1, 2):
+        os.kill(worker.pid, signal.SIGKILL)
+        wait_until(lambda: worker.restarts == restarts and worker.is_available())
+
+    assert restart_delays(caplog, "crashy") == [0.01, 0.02]
+
+
+def test_a_worker_is_given_up_after_max_restarts(
+    supervision_path, supervised, monkeypatch
+):
+    marker = supervision_path / "broken"
+    monkeypatch.setenv("COGITO_TEST_MARKER", str(marker))
+    worker = supervise(
+        supervised,
+        "flaky",
+        "cogito_flaky_predictor",
+        policy=RestartPolicy(initial_delay=0.01, max_delay=0.01, max_restarts=2),
+    )
+
+    marker.touch()
+    os.kill(worker.pid, signal.SIGKILL)
+    wait_until(lambda: not worker._monitor.is_alive())
+
+    with pytest.raises(WorkerUnavailableError) as error:
+        asyncio.run(worker.predict({}))
+    assert error.value.detail == "worker crashed and is no longer restarted"
+    assert worker.restarts == 0
+    assert not multiprocessing.active_children()
+
+
+def test_stop_interrupts_the_backoff_and_starts_nothing(supervision_path, supervised):
+    worker = supervise(
+        supervised,
+        "crashy",
+        "cogito_crashy_predictor",
+        policy=RestartPolicy(initial_delay=60.0, max_delay=60.0),
+    )
+    os.kill(worker.pid, signal.SIGKILL)
+    wait_until(lambda: worker.pid is None)
+
+    stopper = threading.Thread(target=worker.stop, args=(5.0,))
+    stopper.start()
+    stopper.join(10.0)
+
+    assert not stopper.is_alive()
+    assert worker.restarts == 0
+    assert not multiprocessing.active_children()
+
+
+def test_stop_abandons_a_restart_in_progress(supervision_path, supervised, monkeypatch):
+    slow = supervision_path / "slow"
+    monkeypatch.setenv("COGITO_TEST_SLOW", str(slow))
+    worker = supervise(supervised, "flaky", "cogito_flaky_predictor")
+    first_pid = worker.pid
+
+    slow.touch()
+    os.kill(first_pid, signal.SIGKILL)
+    # The restarted worker is now importing its predictor, which takes 60s.
+    wait_until(
+        lambda: any(
+            child.pid != first_pid for child in multiprocessing.active_children()
+        )
+    )
+    stopper = threading.Thread(target=worker.stop, args=(5.0,))
+    stopper.start()
+    stopper.join(20.0)
+
+    assert not stopper.is_alive()
+    assert worker.restarts == 0
+    assert not multiprocessing.active_children()
+
+
+def test_stop_leaves_no_live_worker_and_is_idempotent(supervision_path, supervised):
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
+    pid = worker.pid
+
+    worker.stop(timeout=5.0)
+    worker.stop(timeout=5.0)
+
+    assert not pid_exists(pid)
+    assert not multiprocessing.active_children()
+    with pytest.raises(WorkerUnavailableError) as error:
+        asyncio.run(worker.predict({}))
+    assert error.value.detail == "worker is not running"
+
+
+def test_workers_ignore_sigint(supervision_path, supervised):
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
+    pid = worker.pid
+
+    os.kill(pid, signal.SIGINT)
+
+    assert asyncio.run(worker.predict({"delay": 0.2}, timeout=30.0)) == pid
+    assert worker.restarts == 0
+
+
+def test_supervisor_rejects_duplicated_predictor_names():
+    spec = WorkerSpec(name="toy", class_path="cogito_toy_predictor:Predictor")
+
+    with pytest.raises(ValueError):
+        WorkerSupervisor([spec, spec])
+
+
+def test_supervisor_stops_the_started_workers_when_one_cannot_start(supervision_path):
+    supervisor = WorkerSupervisor(
+        [
+            WorkerSpec(name="good", class_path="cogito_crashy_predictor:Predictor"),
+            WorkerSpec(name="broken", class_path="cogito_broken_predictor:Predictor"),
+        ],
+        start_timeout=60.0,
+    )
+
+    with pytest.raises(WorkerStartError):
+        supervisor.start()
+
+    assert not multiprocessing.active_children()
+
+
+def test_supervisor_stops_every_worker(supervision_path):
+    supervisor = WorkerSupervisor(
+        [
+            WorkerSpec(name=name, class_path="cogito_crashy_predictor:Predictor")
+            for name in ("first", "second")
+        ],
+        policy=FAST_RESTARTS,
+        start_timeout=60.0,
+    )
+    supervisor.start()
+    pids = [worker.pid for worker in supervisor]
+    assert asyncio.run(supervisor["second"].predict({}, timeout=30.0)) == pids[1]
+
+    supervisor.stop(timeout=5.0)
+
+    assert not any(pid_exists(pid) for pid in pids)
+    assert not multiprocessing.active_children()
+
+
+def run_supervisor_launcher(path, mode):
+    launcher = path / "supervisor_launcher.py"
+    launcher.write_text(SUPERVISOR_LAUNCHER)
+    out = path / "pids.json"
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(path), env.get("PYTHONPATH")])
+    )
+    process = subprocess.Popen([sys.executable, str(launcher), str(out), mode], env=env)
+    wait_until(lambda: out.exists() and out.read_text())
+    return process, json.loads(out.read_text())
+
+
+def test_no_worker_is_left_when_the_gateway_returns_without_stopping(
+    supervision_path,
+):
+    process, pids = run_supervisor_launcher(supervision_path, "return")
+
+    assert process.wait(timeout=60) == 0
+    assert not any(pid_exists(pid) for pid in pids)
+
+
+def test_no_worker_is_left_after_sigterm(supervision_path):
+    process, pids = run_supervisor_launcher(supervision_path, "sigterm")
+    assert all(pid_exists(pid) for pid in pids)
+
+    process.send_signal(signal.SIGTERM)
+
+    assert process.wait(timeout=60) == 0
+    assert not any(pid_exists(pid) for pid in pids)
+
+
+def test_workers_exit_when_the_gateway_is_killed(supervision_path):
+    process, pids = run_supervisor_launcher(supervision_path, "wait")
+
+    process.kill()
+    process.wait(timeout=60)
+
+    # Their parent is gone: whoever adopts them reaps them once they exit.
+    wait_until(lambda: not any(pid_exists(pid) for pid in pids))
+
+
+def test_unavailable_worker_surfaces_as_503_with_a_clear_message(
+    supervision_path, supervised
+):
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
+    worker.stop(timeout=5.0)
+
+    async def run():
+        try:
+            await worker.predict({})
+        except WorkerUnavailableError as error:
+            return await worker_unavailable_exception_handler(None, error)
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {
+        "detail": "Worker for predictor crashy is unavailable: worker is not running"
+    }
+
+
+def test_an_unexpected_error_while_restarting_is_retried(
+    supervision_path, supervised, monkeypatch
+):
+    import cogito.core.worker as worker_module
+
+    real_spawn = worker_module._spawn
+    calls = []
+
+    def flaky_spawn(*args, **kwargs):
+        # Only restarts pass abort; the first start must succeed.
+        if kwargs.get("abort") is not None:
+            calls.append(None)
+            if len(calls) == 1:
+                raise OSError("Too many open files")
+        return real_spawn(*args, **kwargs)
+
+    monkeypatch.setattr(worker_module, "_spawn", flaky_spawn)
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
+
+    os.kill(worker.pid, signal.SIGKILL)
+
+    wait_until(lambda: worker.restarts == 1 and worker.is_available())
+    assert len(calls) == 2

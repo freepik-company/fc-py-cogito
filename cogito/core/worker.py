@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import functools
 import importlib
 import inspect
@@ -6,15 +7,28 @@ import json
 import logging
 import multiprocessing
 import os
+import signal
 import sys
 import threading
+import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from multiprocessing.connection import Connection
-from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Tuple, Union
+from multiprocessing.connection import Connection, wait
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
@@ -113,6 +127,11 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     """
     Entry point of the worker process
     """
+    # A Ctrl+C in a terminal reaches the whole process group. The gateway drives
+    # the shutdown and stops its workers itself; a worker killed by it would be
+    # taken for a crash and restarted while the gateway shuts down.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
     # The worker already starts with this env (see _spawn_environ); applying it
     # again keeps it in place before the predictor import however it was started.
     os.environ.update(env)
@@ -588,6 +607,22 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
     only inside the worker.
     Raises WorkerStartError if the predictor cannot be loaded in time.
     """
+    return _spawn(spec, start_timeout)
+
+
+class _SpawnAborted(Exception):
+    """The start of a worker was abandoned because its supervisor is stopping"""
+
+
+def _spawn(
+    spec: WorkerSpec, start_timeout: float, abort: Optional[Connection] = None
+) -> PredictorWorker:
+    """
+    spawn_worker, giving up as soon as abort becomes readable.
+
+    Loading a predictor can take minutes; a supervisor that is stopping must not
+    wait for it, nor leave the half-started process behind.
+    """
     env = build_worker_env(spec)
     # The spec is pickled to reach the worker: copy env into a plain dict, since
     # some Mapping types (e.g. MappingProxyType) cannot be pickled.
@@ -604,7 +639,12 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
     child_conn.close()
 
     try:
-        if not parent_conn.poll(start_timeout):
+        ready = wait(
+            [parent_conn] + ([abort] if abort is not None else []), start_timeout
+        )
+        if parent_conn not in ready and ready:
+            raise _SpawnAborted()
+        if not ready:
             raise WorkerStartError(
                 spec.name, f"predictor not loaded after {start_timeout}s"
             )
@@ -615,6 +655,10 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
         raise WorkerStartError(
             spec.name, f"worker exited with code {process.exitcode}"
         ) from None
+    except _SpawnAborted:
+        _reap(process, timeout=1.0)
+        parent_conn.close()
+        raise
     except BaseException:
         _reap(process, timeout=0)
         parent_conn.close()
@@ -626,3 +670,317 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
         raise WorkerStartError(spec.name, handshake.get("error", "unknown error"))
 
     return PredictorWorker(spec, env, process, parent_conn, handshake)
+
+
+@dataclass(frozen=True)
+class RestartPolicy:
+    """
+    When a supervisor restarts a worker that exited on its own.
+
+    The n-th consecutive restart waits initial_delay * multiplier**n seconds, capped
+    at max_delay. A worker that stayed up for reset_after seconds before exiting
+    starts the sequence again. After max_restarts consecutive restarts the worker
+    is given up on; None never gives up.
+    """
+
+    initial_delay: float = 1.0
+    max_delay: float = 60.0
+    multiplier: float = 2.0
+    reset_after: float = 60.0
+    max_restarts: Optional[int] = None
+
+    def __post_init__(self):
+        if self.initial_delay < 0:
+            raise ValueError(
+                f"initial_delay must not be negative, got {self.initial_delay}"
+            )
+        if self.max_delay < self.initial_delay:
+            raise ValueError(
+                f"max_delay must be at least initial_delay, got {self.max_delay}"
+            )
+        if self.multiplier < 1:
+            raise ValueError(f"multiplier must be at least 1, got {self.multiplier}")
+        if self.reset_after < 0:
+            raise ValueError(
+                f"reset_after must not be negative, got {self.reset_after}"
+            )
+        if self.max_restarts is not None and self.max_restarts < 0:
+            raise ValueError(
+                f"max_restarts must not be negative, got {self.max_restarts}"
+            )
+
+    def delay(self, attempt: int) -> float:
+        """
+        Seconds to wait before the restart number attempt, counting from 0
+        """
+        try:
+            delay = self.initial_delay * self.multiplier**attempt
+        except OverflowError:
+            return self.max_delay
+        return min(delay, self.max_delay)
+
+
+class SupervisedWorker:
+    """
+    Keeps the worker of one predictor running.
+
+    A monitor thread waits for the worker process to exit. When it exits on its own,
+    the requests it had in flight fail with WorkerUnavailableError (see
+    PredictorWorker), and the worker is started again following the restart
+    policy. Requests made while it is down fail at once instead of waiting.
+    """
+
+    def __init__(
+        self,
+        spec: WorkerSpec,
+        policy: Optional[RestartPolicy] = None,
+        start_timeout: float = 120.0,
+    ):
+        self.spec = spec
+        self.policy = policy or RestartPolicy()
+        self.start_timeout = start_timeout
+        self.restarts = 0
+        self._worker: Optional[PredictorWorker] = None
+        self._lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._gave_up = False
+        # Written once by stop() and never read: once readable, it wakes the
+        # monitor from whatever it waits on (the worker's exit or a start).
+        self._wake_reader, self._wake_writer = _MP_CONTEXT.Pipe(duplex=False)
+        self._monitor: Optional[threading.Thread] = None
+
+    @property
+    def pid(self) -> Optional[int]:
+        with self._lock:
+            return self._worker.pid if self._worker is not None else None
+
+    def is_available(self) -> bool:
+        with self._lock:
+            return self._worker is not None and self._worker.is_alive()
+
+    def start(self) -> None:
+        """
+        Start the worker and its monitor.
+
+        Raises WorkerStartError if the first start fails: that is a broken
+        predictor, not a crash, and is not retried.
+        """
+        if self._monitor is not None or self._stopping.is_set():
+            raise RuntimeError(f"Worker for predictor {self.spec.name} already started")
+        worker = spawn_worker(self.spec, self.start_timeout)
+        with self._lock:
+            self._worker = worker
+        self._monitor = threading.Thread(
+            target=self._watch,
+            args=(worker,),
+            name=f"cogito-supervisor-{self.spec.name}",
+            daemon=True,
+        )
+        self._monitor.start()
+
+    async def predict(
+        self,
+        inputs: Union[BaseModel, Mapping[str, Any]],
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """
+        Run a prediction in the current worker, see PredictorWorker.predict.
+
+        Raises WorkerUnavailableError at once while the worker is being restarted.
+        """
+        with self._lock:
+            worker = self._worker
+            if worker is None:
+                if self._stopping.is_set() or self._monitor is None:
+                    detail = "worker is not running"
+                elif self._gave_up:
+                    detail = "worker crashed and is no longer restarted"
+                else:
+                    detail = "worker is restarting"
+                raise WorkerUnavailableError(self.spec.name, detail)
+        return await worker.predict(inputs, timeout)
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """
+        Stop the worker for good: it is not restarted, and a start in progress is
+        abandoned. Safe to call more than once.
+        """
+        with self._lock:
+            if self._stopping.is_set():
+                return
+            # Set under the lock: the monitor checks it under the same lock before
+            # publishing a restarted worker, so none is left running after this.
+            self._stopping.set()
+            worker, self._worker = self._worker, None
+        try:
+            self._wake_writer.send(None)
+        except (BrokenPipeError, OSError):
+            pass
+        if self._monitor is not None:
+            self._monitor.join()
+        if worker is not None:
+            worker.stop(timeout)
+        self._wake_writer.close()
+        self._wake_reader.close()
+
+    def _watch(self, worker: PredictorWorker) -> None:
+        attempt = 0
+        while True:
+            started_at = time.monotonic()
+            wait([worker.process.sentinel, self._wake_reader])
+            if self._stopping.is_set():
+                return
+            uptime = time.monotonic() - started_at
+            with self._lock:
+                if self._worker is worker:
+                    self._worker = None
+            # The process is gone: this only reaps it and lets the reader thread
+            # fail the requests it had in flight.
+            worker.stop(timeout=1.0)
+            _logger.error(
+                "Worker exited unexpectedly",
+                extra={
+                    "predictor": self.spec.name,
+                    "pid": worker.pid,
+                    "exitcode": worker.process.exitcode,
+                    "uptime": round(uptime, 3),
+                },
+            )
+            if uptime >= self.policy.reset_after:
+                attempt = 0
+
+            worker, attempt = self._restart(attempt)
+            if worker is None:
+                return
+
+    def _restart(self, attempt: int) -> Tuple[Optional[PredictorWorker], int]:
+        """
+        Start the worker again, backing off between failed starts.
+
+        Returns the new worker, or None if the supervisor stopped or gave up, and
+        the number of consecutive restarts so far.
+        """
+        while True:
+            max_restarts = self.policy.max_restarts
+            if max_restarts is not None and attempt >= max_restarts:
+                with self._lock:
+                    self._gave_up = True
+                _logger.critical(
+                    "Worker is no longer restarted",
+                    extra={"predictor": self.spec.name, "restarts": attempt},
+                )
+                return None, attempt
+            delay = self.policy.delay(attempt)
+            attempt += 1
+            _logger.warning(
+                "Restarting worker",
+                extra={
+                    "predictor": self.spec.name,
+                    "attempt": attempt,
+                    "delay": delay,
+                },
+            )
+            if self._stopping.wait(delay):
+                return None, attempt
+            try:
+                worker = _spawn(self.spec, self.start_timeout, abort=self._wake_reader)
+            except _SpawnAborted:
+                return None, attempt
+            except Exception as e:
+                # Anything else (e.g. no file descriptors left) is retried too: a
+                # monitor that died here would leave the worker down for good.
+                is_start_error = isinstance(e, WorkerStartError)
+                _logger.error(
+                    "Unable to restart worker",
+                    extra={
+                        "predictor": self.spec.name,
+                        "error": e.detail if is_start_error else str(e),
+                    },
+                    exc_info=not is_start_error,
+                )
+                continue
+            with self._lock:
+                if self._stopping.is_set():
+                    stopped = True
+                else:
+                    stopped = False
+                    self._worker = worker
+                    self.restarts += 1
+            if stopped:
+                worker.stop(timeout=1.0)
+                return None, attempt
+            return worker, attempt
+
+
+class WorkerSupervisor:
+    """
+    The supervised workers of every predictor, started and stopped together.
+
+    Once started, the workers are also stopped when the interpreter exits, so a
+    gateway that returns without calling stop() (e.g. uvicorn after SIGTERM) leaves
+    no worker behind.
+    """
+
+    def __init__(
+        self,
+        specs: Iterable[WorkerSpec],
+        policy: Optional[RestartPolicy] = None,
+        start_timeout: float = 120.0,
+        stop_timeout: float = 10.0,
+    ):
+        self.stop_timeout = stop_timeout
+        self._workers: Dict[str, SupervisedWorker] = {}
+        for spec in specs:
+            if spec.name in self._workers:
+                raise ValueError(f"Duplicated predictor name: {spec.name}")
+            self._workers[spec.name] = SupervisedWorker(spec, policy, start_timeout)
+
+    def __getitem__(self, name: str) -> SupervisedWorker:
+        return self._workers[name]
+
+    def __iter__(self) -> Iterator[SupervisedWorker]:
+        return iter(list(self._workers.values()))
+
+    def start(self) -> None:
+        """
+        Start every worker. If one cannot start, the ones already started are
+        stopped and its WorkerStartError is raised.
+        """
+        try:
+            for worker in self._workers.values():
+                worker.start()
+        except BaseException:
+            # Stopping a worker that never started only releases its resources.
+            _stop_all(list(self._workers.values()), self.stop_timeout)
+            raise
+        # multiprocessing joins the non-daemon workers at exit from its own atexit
+        # hook, which would wait forever: a worker only exits once asked to or once
+        # its pipe closes. atexit runs hooks last registered first, and
+        # multiprocessing registered its hook when the first worker was started,
+        # so this one runs before it.
+        atexit.register(self.stop)
+
+    def stop(self, timeout: Optional[float] = None) -> None:
+        """
+        Stop every worker, in parallel. Safe to call more than once.
+        """
+        atexit.unregister(self.stop)
+        _stop_all(
+            list(self._workers.values()),
+            self.stop_timeout if timeout is None else timeout,
+        )
+
+
+def _stop_all(workers: List[SupervisedWorker], timeout: float) -> None:
+    threads = [
+        threading.Thread(
+            target=worker.stop,
+            args=(timeout,),
+            name=f"cogito-stop-supervisor-{worker.spec.name}",
+        )
+        for worker in workers
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
