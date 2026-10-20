@@ -1016,20 +1016,21 @@ class SupervisedWorker:
                             daemon=True,
                         )
                         # Published first, so that from here on stop() finds it.
-                        self._worker, self._monitor = worker, monitor
                         try:
+                            self._worker, self._monitor = worker, monitor
                             monitor.start()
+                            # Include ownership transfer in this guard: SIGINT
+                            # can arrive after Thread.start() returns.
+                            supervised = True
                         except BaseException:
                             # start() may raise after the thread was launched.
                             # Cancel under the publication lock before it can
                             # mistake failed-start cleanup for a crash to restart.
                             self._stopping.set()
                             self._worker = None
+                            supervised = False
                             monitor_failed = True
                             raise
-                        # From here on the monitor owns the worker, even if it
-                        # exits and is replaced before start() returns.
-                        supervised = True
             finally:
                 if not supervised:
                     # Stopped meanwhile, or interrupted (no thread left, a signal

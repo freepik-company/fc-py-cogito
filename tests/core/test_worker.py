@@ -2181,3 +2181,40 @@ def test_real_interrupted_join_waits_for_monitor_body_before_closing_resources(
     assert worker._monitor_done.is_set()
     assert worker._wake_reader.closed
     assert not multiprocessing.active_children()
+
+
+def test_interruption_after_monitor_start_return_cancels_supervision(
+    supervision_path, supervised
+):
+    worker = SupervisedWorker(
+        WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor"),
+        policy=FAST_RESTARTS,
+        start_timeout=60.0,
+    )
+    supervised.append(worker)
+    launched = []
+    previous_trace = sys.gettrace()
+
+    def interrupt_after_thread_start(frame, event, arg):
+        if frame.f_code is SupervisedWorker.start.__code__ and event == "line":
+            monitor = frame.f_locals.get("monitor")
+            if monitor is not None and monitor.ident is not None:
+                # The first source line after real Thread.start() returned,
+                # before the ownership assignment can run.
+                launched.append(monitor)
+                raise KeyboardInterrupt()
+        return interrupt_after_thread_start
+
+    try:
+        sys.settrace(interrupt_after_thread_start)
+        with pytest.raises(KeyboardInterrupt):
+            worker.start()
+    finally:
+        sys.settrace(previous_trace)
+    assert len(launched) == 1
+    assert worker._monitor_done.is_set()
+    assert not launched[0].is_alive()
+    assert worker._monitor is None
+    assert worker.restarts == 0
+    assert worker._wake_reader.closed
+    assert not multiprocessing.active_children()
