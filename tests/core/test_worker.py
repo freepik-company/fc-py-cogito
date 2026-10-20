@@ -368,6 +368,23 @@ IPC_PREDICTORS = {
                     sys.exit("negative value")
                 return value
     """,
+    "cogito_nested_exit_predictor": """
+        import asyncio
+        import sys
+
+
+        async def child():
+            sys.exit("child gave up")
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            async def predict(self) -> int:
+                await asyncio.gather(child())
+                return 0
+    """,
     "cogito_foreign_bad_request_predictor": """
         class BadRequestError(Exception):
             pass
@@ -672,3 +689,13 @@ def test_worker_exit_fails_a_request_whose_send_is_still_queued(ipc_predictors_p
         asyncio.run(run())
     finally:
         worker.stop(timeout=5.0)
+
+
+def test_system_exit_in_a_nested_task_fails_the_request(ipc_predictors_path, workers):
+    worker = start(workers, "nested", "cogito_nested_exit_predictor")
+
+    with pytest.raises(WorkerUnavailableError):
+        asyncio.run(asyncio.wait_for(worker.predict({}), 30.0))
+
+    worker.process.join(5.0)
+    assert worker.process.exitcode == 1

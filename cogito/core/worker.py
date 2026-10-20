@@ -148,10 +148,21 @@ class _EventLoopThread:
 
     def __init__(self, name: str):
         self.loop = asyncio.new_event_loop()
-        self.thread = threading.Thread(
-            target=self.loop.run_forever, name=name, daemon=True
-        )
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
         self.thread.start()
+
+    def _run(self) -> None:
+        try:
+            self.loop.run_forever()
+        except BaseException:
+            # A SystemExit or KeyboardInterrupt raised in a task the predictor
+            # spawned escapes run_forever and stops the loop, so nothing can
+            # finish the requests waiting on it. Exit the worker: the gateway sees
+            # EOF and fails them with WorkerUnavailableError.
+            _logger.critical(
+                "Event loop of the worker stopped unexpectedly", exc_info=True
+            )
+            os._exit(1)
 
     def run(self, coroutine) -> Any:
         failed, value = asyncio.run_coroutine_threadsafe(
