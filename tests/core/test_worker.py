@@ -919,6 +919,33 @@ SUPERVISION_PREDICTORS = {
             def predict(self) -> int:
                 return 0
     """,
+    # The same, after forking a helper (its pid goes to COGITO_TEST_OUT), which
+    # holds the handshake pipe as well.
+    "cogito_partial_handshake_helper_predictor": """
+        import gc
+        import os
+        import struct
+        import time
+        from multiprocessing.connection import Connection
+
+        conn = next(o for o in gc.get_objects() if isinstance(o, Connection))
+        helper = os.fork()
+        if helper == 0:
+            time.sleep(60)
+            os._exit(0)
+        with open(os.environ["COGITO_TEST_OUT"], "w") as out:
+            out.write(str(helper))
+        os.write(conn.fileno(), struct.pack("!i", 1024 * 1024) + b"partial")
+        time.sleep(600)
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self) -> int:
+                return 0
+    """,
     # Forks a helper while loading, writes both pids to COGITO_TEST_OUT, then takes
     # a minute to load.
     "cogito_slow_load_predictor": """
@@ -1836,3 +1863,37 @@ def test_a_handshake_frozen_halfway_still_times_out(supervision_path):
 
     assert error.value.detail == "predictor not loaded after 3.0s"
     assert not multiprocessing.active_children()
+
+
+def test_a_frozen_handshake_times_out_even_with_a_forked_helper(
+    supervision_path, monkeypatch
+):
+    out = supervision_path / "helper.pid"
+    monkeypatch.setenv("COGITO_TEST_OUT", str(out))
+    errors = []
+
+    def start():
+        try:
+            spawn_worker(
+                WorkerSpec(
+                    name="partial",
+                    class_path="cogito_partial_handshake_helper_predictor:Predictor",
+                ),
+                start_timeout=3.0,
+            )
+        except WorkerStartError as error:
+            errors.append(error)
+
+    # In a thread, so a start that hangs fails the test instead of blocking it.
+    starter = threading.Thread(target=start, daemon=True)
+    starter.start()
+    starter.join(30.0)
+    helper = int(out.read_text()) if out.exists() and out.read_text() else None
+    try:
+        assert not starter.is_alive()
+        assert [error.detail for error in errors] == ["predictor not loaded after 3.0s"]
+        assert helper is not None
+        wait_until(lambda: not pid_exists(helper), timeout=10.0)
+    finally:
+        if helper is not None and pid_exists(helper):
+            os.kill(helper, signal.SIGKILL)

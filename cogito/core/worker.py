@@ -842,6 +842,10 @@ def _recv_handshake(
         ready = wait([done_reader] + ([abort] if abort is not None else []), remaining)
         if done_reader not in ready:
             outcome.append("aborted" if ready else "timed out")
+            # The whole group: a helper the predictor forked holds the pipe too,
+            # and recv() would wait for it. The worker is not reaped yet, so its
+            # pid still names its group.
+            _kill_process_group(process)
             process.kill()
 
     thread = threading.Thread(
