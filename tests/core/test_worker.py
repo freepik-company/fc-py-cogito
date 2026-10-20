@@ -1897,3 +1897,88 @@ def test_a_frozen_handshake_times_out_even_with_a_forked_helper(
     finally:
         if helper is not None and pid_exists(helper):
             os.kill(helper, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("stop_during_start", [False, True])
+def test_worker_replacement_during_start_is_not_shutdown(
+    supervision_path, supervised, stop_during_start
+):
+    worker = SupervisedWorker(
+        WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor"),
+        policy=FAST_RESTARTS,
+        start_timeout=60.0,
+    )
+    supervised.append(worker)
+    starter = threading.get_ident()
+    real_lock = worker._lock
+    stopper = None
+
+    class ReplaceBeforeStartReturns:
+        entries = 0
+
+        def __enter__(self):
+            real_lock.acquire()
+            if threading.get_ident() == starter:
+                self.entries += 1
+
+        def __exit__(self, *args):
+            nonlocal stopper
+            replace = threading.get_ident() == starter and self.entries == 2
+            real_lock.release()
+            if replace:
+                # Force the monitor to replace the first worker after publication
+                # but before start() checks its outcome, without relying on timing.
+                first = worker._worker
+                os.kill(first.pid, signal.SIGKILL)
+                wait_until(lambda: worker.restarts == 1 and worker.is_available())
+                assert worker._worker is not first
+                if stop_during_start:
+                    stopper = threading.Thread(target=worker.stop, args=(5.0,))
+                    stopper.start()
+                    wait_until(worker._stopping.is_set)
+
+    worker._lock = ReplaceBeforeStartReturns()
+    try:
+        if stop_during_start:
+            with pytest.raises(WorkerStartError, match="stopped while starting"):
+                worker.start()
+        else:
+            worker.start()
+            assert worker.restarts == 1
+            assert worker.is_available()
+    finally:
+        if stopper is not None:
+            stopper.join(20.0)
+            assert not stopper.is_alive()
+    if stop_during_start:
+        assert not worker.is_available()
+        assert not multiprocessing.active_children()
+
+
+def test_load_error_handshake_failure_cleans_up_the_process_group(monkeypatch):
+    from unittest.mock import Mock
+
+    from cogito.core import worker as worker_module
+
+    class GroupExited(BaseException):
+        pass
+
+    # Exercise the worker entry point in isolation: never change pytest's signals
+    # or process group, nor start its parent watchdog.
+    monkeypatch.setattr(signal, "signal", Mock())
+    monkeypatch.setattr(os, "setpgrp", Mock())
+    monkeypatch.setattr(threading.Thread, "start", Mock())
+    monkeypatch.setattr(
+        worker_module, "_load_predictor", Mock(side_effect=RuntimeError("load failed"))
+    )
+    cleanup = Mock(side_effect=GroupExited)
+    monkeypatch.setattr(worker_module, "_exit_with_process_group", cleanup)
+    conn = Mock()
+    conn.send.side_effect = BrokenPipeError("gateway is gone")
+
+    with pytest.raises(GroupExited):
+        worker_module._worker_main(WorkerSpec("broken", "broken:Predictor"), {}, conn)
+
+    assert conn.send.call_args.args[0]["status"] == "error"
+    assert "load failed" in conn.send.call_args.args[0]["error"]
+    cleanup.assert_called_once_with()

@@ -155,13 +155,18 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     try:
         predictor = _load_predictor(spec.class_path)
     except BaseException:
-        conn.send(
-            {
-                "status": "error",
-                "pid": os.getpid(),
-                "error": traceback.format_exc(),
-            }
-        )
+        try:
+            conn.send(
+                {
+                    "status": "error",
+                    "pid": os.getpid(),
+                    "error": traceback.format_exc(),
+                }
+            )
+        except OSError:
+            # The gateway is gone already: nobody would stop what the failed load
+            # may have started.
+            _exit_with_process_group()
         conn.close()
         sys.exit(1)
 
@@ -992,6 +997,7 @@ class SupervisedWorker:
                 raise WorkerStartError(
                     self.spec.name, "stopped while starting"
                 ) from None
+            supervised = False
             try:
                 with self._lock:
                     if not self._stopping.is_set():
@@ -1008,14 +1014,15 @@ class SupervisedWorker:
                         except BaseException:
                             self._worker, self._monitor = None, None
                             raise
+                        # From here on the monitor owns the worker, even if it
+                        # exits and is replaced before start() returns.
+                        supervised = True
             finally:
-                with self._lock:
-                    owned = self._worker is worker
-                if not owned:
+                if not supervised:
                     # Stopped meanwhile, or interrupted (no thread left, a signal
                     # handler raising): nothing else would ever stop this worker.
                     worker.terminate(timeout=1.0)
-            if not owned:
+            if not supervised or self._stopping.is_set():
                 raise WorkerStartError(self.spec.name, "stopped while starting")
         finally:
             # stop() waits for this before it joins the monitor and closes the pipe
