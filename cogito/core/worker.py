@@ -968,6 +968,7 @@ class SupervisedWorker:
         # monitor from whatever it waits on (the worker's exit or a start).
         self._wake_reader, self._wake_writer = _MP_CONTEXT.Pipe(duplex=False)
         self._monitor: Optional[threading.Thread] = None
+        self._monitor_done = threading.Event()
         self._started = False
         self._start_done = threading.Event()
 
@@ -987,13 +988,16 @@ class SupervisedWorker:
         Raises WorkerStartError if the first start fails: that is a broken
         predictor, not a crash, and is not retried. A stop() meanwhile abandons it.
         """
-        with self._lock:
-            if self._started or self._stopping.is_set():
-                raise RuntimeError(
-                    f"Worker for predictor {self.spec.name} already started"
-                )
-            self._started = True
+        owns_start = False
         try:
+            with self._lock:
+                if self._started or self._stopping.is_set():
+                    raise RuntimeError(
+                        f"Worker for predictor {self.spec.name} already started"
+                    )
+                self._start_done.clear()
+                owns_start = True
+                self._started = True
             try:
                 worker = _spawn(self.spec, self.start_timeout, abort=self._wake_reader)
             except _SpawnAborted:
@@ -1006,7 +1010,7 @@ class SupervisedWorker:
                 with self._lock:
                     if not self._stopping.is_set():
                         monitor = threading.Thread(
-                            target=self._watch,
+                            target=self._run_monitor,
                             args=(worker,),
                             name=f"cogito-supervisor-{self.spec.name}",
                             daemon=True,
@@ -1038,7 +1042,7 @@ class SupervisedWorker:
                             # waiting for it. A thread that never started cannot
                             # be joined; it has no ident.
                             if monitor.ident is not None:
-                                monitor.join()
+                                self._wait_monitor()
                             self._monitor = None
                             self._close_wake_pipe()
             if not supervised or self._stopping.is_set():
@@ -1046,7 +1050,8 @@ class SupervisedWorker:
         finally:
             # stop() waits for this before it joins the monitor and closes the pipe
             # the start waits on.
-            self._start_done.set()
+            if owns_start:
+                self._start_done.set()
 
     async def predict(
         self,
@@ -1134,8 +1139,22 @@ class SupervisedWorker:
             # A first start in progress sees the wake-up and gives up.
             self._start_done.wait()
         if self._monitor is not None:
-            self._monitor.join()
+            self._wait_monitor()
         return True, worker
+
+    def _wait_monitor(self) -> None:
+        self._monitor.join()
+        # An interrupted Thread.join() can mark a running thread as stopped on
+        # some CPython versions. Only the target's finally proves it is done
+        # using the wake pipe and any unpublished replacement worker.
+        self._monitor_done.wait()
+
+    def _run_monitor(self, worker: PredictorWorker) -> None:
+        try:
+            if not self._stopping.is_set():
+                self._watch(worker)
+        finally:
+            self._monitor_done.set()
 
     def _close_wake_pipe(self) -> None:
         self._wake_writer.close()

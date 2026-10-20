@@ -2076,3 +2076,108 @@ def test_interrupted_monitor_join_keeps_worker_for_shutdown_retry(
     assert worker._wake_reader.closed
     assert not pid_exists(pid)
     assert not multiprocessing.active_children()
+
+
+def test_start_publication_interruption_signals_its_completion(supervision_path):
+    worker = SupervisedWorker(
+        WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor")
+    )
+    real_lock = worker._lock
+
+    class InterruptPublication:
+        def __enter__(self):
+            real_lock.acquire()
+
+        def __exit__(self, *args):
+            real_lock.release()
+            raise KeyboardInterrupt()
+
+    worker._lock = InterruptPublication()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            worker.start()
+        assert worker._started
+        assert worker._start_done.is_set()
+    finally:
+        worker._lock = real_lock
+        # Bound cleanup even if this regression fails.
+        worker._start_done.set()
+        worker.stop(timeout=5.0)
+    assert not multiprocessing.active_children()
+
+
+def test_rejected_start_does_not_complete_another_start():
+    worker = SupervisedWorker(WorkerSpec(name="crashy", class_path="unused:Predictor"))
+    # A concurrent caller observes the state published by the accepted start.
+    worker._started = True
+    try:
+        with pytest.raises(RuntimeError, match="already started"):
+            worker.start()
+        assert not worker._start_done.is_set()
+    finally:
+        worker._start_done.set()
+        worker.stop(timeout=5.0)
+
+
+def test_real_interrupted_join_waits_for_monitor_body_before_closing_resources(
+    supervision_path, supervised, monkeypatch
+):
+    worker = SupervisedWorker(
+        WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+    supervised.append(worker)
+    entered = threading.Event()
+    release = threading.Event()
+    joining = threading.Event()
+    resumed = threading.Event()
+    real_watch = worker._watch
+
+    def blocked_watch(initial):
+        entered.set()
+        release.wait()
+        real_watch(initial)
+
+    monkeypatch.setattr(worker, "_watch", blocked_watch)
+    worker.start()
+    assert entered.wait(5.0)
+    real_join = worker._monitor.join
+
+    def join(*args, **kwargs):
+        joining.set()
+        return real_join(*args, **kwargs)
+
+    def interrupt_join():
+        if joining.wait(5.0):
+            time.sleep(0.1)
+            os.kill(os.getpid(), signal.SIGINT)
+
+    def resume():
+        worker.terminate(timeout=5.0)
+        resumed.set()
+
+    interrupter = threading.Thread(target=interrupt_join)
+    recovery = threading.Thread(target=resume)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(worker._monitor, "join", join)
+            interrupter.start()
+            with pytest.raises(KeyboardInterrupt):
+                worker.stop(timeout=5.0)
+        interrupter.join(5.0)
+        recovery.start()
+        # A falsely stopped Thread must not permit closing resources while its
+        # target is still running. This also passes on CPython with join fixed.
+        assert not resumed.wait(0.2)
+        assert not worker._monitor_done.is_set()
+        assert not worker._wake_reader.closed
+        assert not worker._shutdown_complete
+    finally:
+        release.set()
+        interrupter.join(5.0)
+        if recovery.ident is not None:
+            recovery.join(10.0)
+    assert resumed.is_set()
+    assert worker._monitor_done.is_set()
+    assert worker._wake_reader.closed
+    assert not multiprocessing.active_children()
