@@ -3,7 +3,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 
-from cogito.core.exceptions import NoThreadsAvailableError, BadRequestError
+from cogito.core.exceptions import (
+    BadRequestError,
+    NoThreadsAvailableError,
+    WorkerTimeoutError,
+)
 
 
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -42,4 +46,13 @@ async def bad_request_exception_handler(
                 "detail": exc.message,
             }
         ),
+    )
+
+
+async def worker_timeout_exception_handler(
+    request: Request, exc: WorkerTimeoutError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+        content=jsonable_encoder({"detail": str(exc)}),
     )

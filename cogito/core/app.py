@@ -23,12 +23,14 @@ from cogito.core.exceptioin_handlers import (
     bad_request_exception_handler,
     too_many_requests_exception_handler,
     validation_exception_handler,
+    worker_timeout_exception_handler,
 )
 from cogito.core.exceptions import (
     BadRequestError,
     ConfigFileNotFoundError,
     NoThreadsAvailableError,
     SetupError,
+    WorkerTimeoutError,
 )
 from cogito.core.logging import get_logger
 from cogito.core.models import BasePredictor
@@ -153,6 +155,9 @@ class Application:
         )
         self.app.add_exception_handler(
             NoThreadsAvailableError, too_many_requests_exception_handler
+        )
+        self.app.add_exception_handler(
+            WorkerTimeoutError, worker_timeout_exception_handler
         )
 
     def _set_default_routes(self) -> None:

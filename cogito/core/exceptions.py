@@ -54,3 +54,25 @@ class WorkerStartError(Exception):
         super().__init__(f"Unable to start worker for predictor {predictor}: {detail}")
         self.predictor = predictor
         self.detail = detail
+
+
+class WorkerTimeoutError(Exception):
+    def __init__(self, predictor: str, timeout: float):
+        super().__init__(f"Predictor {predictor} did not respond within {timeout:g}s")
+        self.predictor = predictor
+        self.timeout = timeout
+
+
+class WorkerPredictionError(Exception):
+    def __init__(self, predictor: str, message: str, traceback: str = None):
+        super().__init__(f"Predictor {predictor} failed: {message}")
+        self.predictor = predictor
+        self.message = message
+        self.traceback = traceback
+
+
+class WorkerUnavailableError(Exception):
+    def __init__(self, predictor: str, detail: str):
+        super().__init__(f"Worker for predictor {predictor} is unavailable: {detail}")
+        self.predictor = predictor
+        self.detail = detail

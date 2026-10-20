@@ -1,15 +1,29 @@
+import asyncio
 import importlib
+import inspect
+import logging
 import multiprocessing
 import os
 import sys
 import threading
 import traceback
+import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from multiprocessing.connection import Connection
-from typing import Any, Dict, Iterator, Mapping, Optional
+from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Tuple, Union
 
-from cogito.core.exceptions import WorkerStartError
+from fastapi.encoders import jsonable_encoder
+from pydantic import BaseModel
+
+from cogito.core.exceptions import (
+    BadRequestError,
+    WorkerPredictionError,
+    WorkerStartError,
+    WorkerTimeoutError,
+    WorkerUnavailableError,
+)
 
 # Workers always use the spawn start method: a forked child would inherit any CUDA
 # context the parent created, and the env must be in place before the predictor
@@ -17,6 +31,17 @@ from cogito.core.exceptions import WorkerStartError
 _MP_CONTEXT = multiprocessing.get_context("spawn")
 
 STOP_MESSAGE = "stop"
+
+# Messages exchanged after the start handshake. A request carries a correlation id
+# that its response echoes back, so responses can arrive in any order:
+#   {"type": "predict", "id": str, "inputs": dict}
+#   {"type": "result", "id": str, "status": "ok", "result": Any}
+#   {"type": "result", "id": str, "status": "error", "error_type": str,
+#    "message": str, "traceback": str}
+PREDICT_MESSAGE = "predict"
+RESULT_MESSAGE = "result"
+
+_logger = logging.getLogger(__name__)
 
 # Serialises the temporary changes to os.environ made while a worker starts.
 _SPAWN_ENV_LOCK = threading.Lock()
@@ -30,12 +55,18 @@ class WorkerSpec:
     cuda_visible_devices is the final value for CUDA_VISIBLE_DEVICES: None inherits
     the parent's value, an empty string hides every GPU (CPU-only placement).
     env holds extra resource variables, applied after the ones cogito sets.
+    concurrency is how many requests the worker runs at the same time.
     """
 
     name: str
     class_path: str
     cuda_visible_devices: Optional[str] = None
     env: Mapping[str, str] = field(default_factory=dict)
+    concurrency: int = 1
+
+    def __post_init__(self):
+        if self.concurrency < 1:
+            raise ValueError(f"concurrency must be at least 1, got {self.concurrency}")
 
 
 def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
@@ -92,16 +123,100 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
         }
     )
 
-    # Wait until the parent asks the worker to stop or goes away.
-    while True:
-        try:
-            message = conn.recv()
-        except EOFError:
-            break
-        if message == STOP_MESSAGE:
-            break
-
+    _serve(spec, predictor, conn)
     conn.close()
+
+
+class _EventLoopThread:
+    """
+    An event loop running in its own thread, for async predictors
+    """
+
+    def __init__(self, name: str):
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(
+            target=self.loop.run_forever, name=name, daemon=True
+        )
+        self.thread.start()
+
+    def run(self, coroutine) -> Any:
+        return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result()
+
+    def close(self) -> None:
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join()
+        self.loop.close()
+
+
+def _handle_request(
+    call: Callable[..., Any],
+    message: Dict[str, Any],
+    reply: Callable[[Dict[str, Any]], None],
+) -> None:
+    """
+    Run one request and send its response, tagged with the request's id
+    """
+    response = {"type": RESULT_MESSAGE, "id": message["id"]}
+    try:
+        # Only plain data goes back: the parent must never unpickle a type defined
+        # in the predictor module, since that would import it in the gateway.
+        result = jsonable_encoder(call(**message["inputs"]))
+    except Exception as e:
+        is_bad_request = isinstance(e, BadRequestError)
+        response.update(
+            status="error",
+            error_type="BadRequestError" if is_bad_request else type(e).__name__,
+            message=e.message if is_bad_request else str(e),
+            traceback=traceback.format_exc(),
+        )
+    else:
+        response.update(status="ok", result=result)
+    reply(response)
+
+
+def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
+    """
+    Run prediction requests until the parent asks the worker to stop or goes away
+    """
+    send_lock = threading.Lock()
+
+    def reply(response: Dict[str, Any]) -> None:
+        # Connection is not thread-safe, and responses come from several threads.
+        with send_lock:
+            try:
+                conn.send(response)
+            except (BrokenPipeError, OSError):
+                pass
+
+    event_loop = None
+    if inspect.iscoroutinefunction(predictor.predict):
+        event_loop = _EventLoopThread(f"cogito-worker-{spec.name}-loop")
+
+        def call(**inputs: Any) -> Any:
+            return event_loop.run(predictor.predict(**inputs))
+
+    else:
+        call = predictor.predict
+
+    executor = ThreadPoolExecutor(
+        max_workers=spec.concurrency,
+        thread_name_prefix=f"cogito-worker-{spec.name}",
+    )
+    try:
+        while True:
+            try:
+                message = conn.recv()
+            except EOFError:
+                break
+            if message == STOP_MESSAGE:
+                break
+            if isinstance(message, dict) and message.get("type") == PREDICT_MESSAGE:
+                executor.submit(_handle_request, call, message, reply)
+    finally:
+        # Requests already running still get their response.
+        executor.shutdown(wait=True)
+        if event_loop is not None:
+            event_loop.close()
 
 
 class PredictorWorker:
@@ -122,6 +237,18 @@ class PredictorWorker:
         self.process = process
         self.conn = conn
         self.handshake = handshake
+        self._send_lock = threading.Lock()
+        # Requests waiting for a response, by correlation id. The reader thread and
+        # the callers' event loops both use it.
+        self._pending: Dict[str, Tuple[asyncio.AbstractEventLoop, asyncio.Future]] = {}
+        self._pending_lock = threading.Lock()
+        self._closed = False
+        self._reader = threading.Thread(
+            target=self._read_responses,
+            name=f"cogito-ipc-{spec.name}",
+            daemon=True,
+        )
+        self._reader.start()
 
     @property
     def pid(self) -> Optional[int]:
@@ -130,17 +257,128 @@ class PredictorWorker:
     def is_alive(self) -> bool:
         return self.process.is_alive()
 
+    async def predict(
+        self,
+        inputs: Union[BaseModel, Mapping[str, Any]],
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """
+        Run a prediction in the worker and return its result as plain data.
+
+        Raises WorkerTimeoutError if no response arrives within timeout seconds,
+        BadRequestError if the predictor rejected the input, WorkerPredictionError
+        if it failed, and WorkerUnavailableError if the worker is gone.
+        """
+        name = self.spec.name
+        if isinstance(inputs, BaseModel):
+            # Request models are created at runtime and cannot be pickled.
+            dump = getattr(inputs, "model_dump", None) or inputs.dict
+            inputs = dump()
+        else:
+            inputs = dict(inputs)
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        request_id = uuid.uuid4().hex
+        with self._pending_lock:
+            if self._closed:
+                raise WorkerUnavailableError(name, "worker is not running")
+            self._pending[request_id] = (loop, future)
+
+        try:
+            message = {"type": PREDICT_MESSAGE, "id": request_id, "inputs": inputs}
+            try:
+                await asyncio.to_thread(self._send, message)
+            except (BrokenPipeError, OSError) as e:
+                raise WorkerUnavailableError(name, str(e)) from e
+
+            try:
+                response = await asyncio.wait_for(future, timeout)
+            except asyncio.TimeoutError:
+                raise WorkerTimeoutError(name, timeout) from None
+        finally:
+            # A response arriving after this point is dropped by the reader.
+            with self._pending_lock:
+                self._pending.pop(request_id, None)
+
+        if response["status"] == "ok":
+            return response["result"]
+        if response["error_type"] == "BadRequestError":
+            raise BadRequestError(response["message"])
+        raise WorkerPredictionError(name, response["message"], response["traceback"])
+
+    def _send(self, message: Dict[str, Any]) -> None:
+        with self._send_lock:
+            self.conn.send(message)
+
+    def _read_responses(self) -> None:
+        """
+        Hand each response to the request with the same correlation id
+        """
+        try:
+            while True:
+                try:
+                    message = self.conn.recv()
+                except (EOFError, OSError):
+                    break
+                if not isinstance(message, dict) or message.get("type") != (
+                    RESULT_MESSAGE
+                ):
+                    continue
+                with self._pending_lock:
+                    entry = self._pending.pop(message.get("id"), None)
+                if entry is None:
+                    _logger.debug(
+                        "Dropping response for an expired request",
+                        extra={"predictor": self.spec.name, "id": message.get("id")},
+                    )
+                    continue
+                loop, future = entry
+                _call_soon(loop, _set_future_result, future, message)
+        finally:
+            # The worker is gone: fail what is still waiting instead of hanging.
+            with self._pending_lock:
+                self._closed = True
+                pending = list(self._pending.values())
+                self._pending.clear()
+            for loop, future in pending:
+                error = WorkerUnavailableError(
+                    self.spec.name, "worker exited before responding"
+                )
+                _call_soon(loop, _set_future_exception, future, error)
+
     def stop(self, timeout: float = 10.0) -> None:
         """
         Ask the worker to stop, and terminate it if it does not exit in time
         """
         if self.process.is_alive():
             try:
-                self.conn.send(STOP_MESSAGE)
+                self._send(STOP_MESSAGE)
             except (BrokenPipeError, OSError):
                 pass
         _reap(self.process, timeout)
+        # The worker held the only other end of the pipe, so the reader sees EOF.
+        self._reader.join(timeout)
         self.conn.close()
+
+
+def _call_soon(loop: asyncio.AbstractEventLoop, callback, *args) -> None:
+    try:
+        loop.call_soon_threadsafe(callback, *args)
+    except RuntimeError:
+        # The caller's event loop is already closed: nobody is waiting.
+        pass
+
+
+def _set_future_result(future: asyncio.Future, result: Any) -> None:
+    # The request may have timed out or been cancelled in the meantime.
+    if not future.done():
+        future.set_result(result)
+
+
+def _set_future_exception(future: asyncio.Future, error: BaseException) -> None:
+    if not future.done():
+        future.set_exception(error)
 
 
 def _reap(process: multiprocessing.process.BaseProcess, timeout: float) -> None:
