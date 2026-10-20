@@ -500,15 +500,25 @@ class PredictorWorker:
                 _call_soon(loop, _set_future_result, future, message)
         finally:
             # The worker is gone: fail what is still waiting instead of hanging.
-            with self._pending_lock:
-                self._closed = True
-                pending = list(self._pending.values())
-                self._pending.clear()
-            for loop, future in pending:
-                error = WorkerUnavailableError(
-                    self.spec.name, "worker exited before responding"
-                )
-                _call_soon(loop, _set_future_exception, future, error)
+            self._fail_pending()
+
+    def _fail_pending(self) -> None:
+        """
+        Fail every request still waiting, and refuse new ones.
+
+        The reader does it on EOF. That EOF never comes while a process the
+        predictor forked still holds the worker's end of the pipe, so stop() and
+        terminate() do it too once the worker is gone.
+        """
+        with self._pending_lock:
+            self._closed = True
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for loop, future in pending:
+            error = WorkerUnavailableError(
+                self.spec.name, "worker exited before responding"
+            )
+            _call_soon(loop, _set_future_exception, future, error)
 
     def stop(self, timeout: float = 10.0) -> None:
         """
@@ -532,6 +542,7 @@ class PredictorWorker:
             stopper.join(timeout)
         self._sender.shutdown(wait=False, cancel_futures=True)
         self._reader.join(timeout)
+        self._fail_pending()
         self.conn.close()
 
     def terminate(self, timeout: float = 10.0) -> None:
@@ -549,6 +560,7 @@ class PredictorWorker:
             self.process.join()
         self._sender.shutdown(wait=False, cancel_futures=True)
         self._reader.join(timeout)
+        self._fail_pending()
         self.conn.close()
 
 
@@ -744,6 +756,11 @@ class RestartPolicy:
         return min(delay, self.max_delay)
 
 
+# How often a supervisor checks that its worker is still alive, besides waking up
+# on its exit.
+_EXIT_CHECK_INTERVAL = 1.0
+
+
 class SupervisedWorker:
     """
     Keeps the worker of one predictor running.
@@ -916,7 +933,13 @@ class SupervisedWorker:
         attempt = 0
         while True:
             started_at = time.monotonic()
-            wait([worker.process.sentinel, self._wake_reader])
+            # The sentinel alone is not enough: a process the predictor forked
+            # inherits the pipe behind it and keeps it open after the worker died.
+            while not self._stopping.is_set() and worker.process.is_alive():
+                wait(
+                    [worker.process.sentinel, self._wake_reader],
+                    _EXIT_CHECK_INTERVAL,
+                )
             if self._stopping.is_set():
                 return
             uptime = time.monotonic() - started_at

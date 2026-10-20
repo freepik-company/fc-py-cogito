@@ -848,6 +848,26 @@ SUPERVISION_PREDICTORS = {
                     os._exit(3)
                 return os.getpid()
     """,
+    # Forks a helper, which inherits the worker's end of the pipe, writes its pid
+    # to out, and exits: the pipe never reaches EOF while the helper lives.
+    "cogito_forking_predictor": """
+        import os
+        import time
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, out: str) -> int:
+                helper = os.fork()
+                if helper == 0:
+                    time.sleep(60)
+                    os._exit(0)
+                with open(out, "w") as f:
+                    f.write(str(helper))
+                os._exit(3)
+    """,
     # Fails to load while the file named by COGITO_TEST_MARKER exists, and loads
     # slowly while the one named by COGITO_TEST_SLOW exists.
     "cogito_flaky_predictor": """
@@ -1510,3 +1530,28 @@ def test_supervisor_terminates_workers_it_cannot_stop_in_parallel(
 
     assert not any(pid_exists(pid) for pid in pids)
     assert not multiprocessing.active_children()
+
+
+def test_requests_fail_when_a_forked_helper_keeps_the_pipe_open(
+    supervision_path, supervised
+):
+    worker = supervise(
+        supervised,
+        "forking",
+        "cogito_forking_predictor",
+        policy=RestartPolicy(initial_delay=60.0, max_delay=60.0),
+    )
+    out = supervision_path / "helper.pid"
+
+    async def run():
+        # No request timeout: only the bound below keeps a hang from blocking.
+        return await asyncio.wait_for(worker.predict({"out": str(out)}), timeout=20.0)
+
+    try:
+        with pytest.raises(WorkerUnavailableError):
+            asyncio.run(run())
+    finally:
+        if out.exists() and out.read_text():
+            helper = int(out.read_text())
+            if pid_exists(helper):
+                os.kill(helper, signal.SIGKILL)
