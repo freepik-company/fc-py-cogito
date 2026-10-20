@@ -1982,3 +1982,67 @@ def test_load_error_handshake_failure_cleans_up_the_process_group(monkeypatch):
     assert conn.send.call_args.args[0]["status"] == "error"
     assert "load failed" in conn.send.call_args.args[0]["error"]
     cleanup.assert_called_once_with()
+
+
+def test_interrupted_monitor_start_does_not_restart_an_untracked_worker(
+    supervision_path, supervised, monkeypatch
+):
+    real_start = threading.Thread.start
+    monitors = []
+
+    def start(thread):
+        real_start(thread)
+        if thread.name.startswith("cogito-supervisor-"):
+            monitors.append(thread)
+            raise KeyboardInterrupt()
+
+    worker = SupervisedWorker(
+        WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor"),
+        policy=FAST_RESTARTS,
+        start_timeout=60.0,
+    )
+    supervised.append(worker)
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+    with pytest.raises(KeyboardInterrupt):
+        worker.start()
+
+    assert len(monitors) == 1
+    assert not monitors[0].is_alive()
+    assert worker._monitor is None
+    assert worker.pid is None
+    assert worker.restarts == 0
+    assert worker._wake_reader.closed
+    assert not multiprocessing.active_children()
+
+
+def test_interrupted_shutdown_keeps_the_exit_cleanup_registered(
+    supervision_path, monkeypatch
+):
+    from cogito.core import worker as worker_module
+
+    supervisor = WorkerSupervisor(
+        [WorkerSpec(name="crashy", class_path="cogito_crashy_predictor:Predictor")],
+        start_timeout=60.0,
+    )
+    supervisor.start()
+    pid = supervisor["crashy"].pid
+    real_start = threading.Thread.start
+
+    def start(thread):
+        if thread.name.startswith("cogito-stop-supervisor-"):
+            raise KeyboardInterrupt()
+        return real_start(thread)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(threading.Thread, "start", start)
+            with pytest.raises(KeyboardInterrupt):
+                supervisor.stop()
+        assert supervisor in worker_module._RUNNING_SUPERVISORS
+        # Exercise the actual interpreter-exit path, which starts no threads.
+        worker_module._terminate_running_supervisors()
+        assert not pid_exists(pid)
+        assert not multiprocessing.active_children()
+    finally:
+        supervisor.stop()

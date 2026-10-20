@@ -998,6 +998,7 @@ class SupervisedWorker:
                     self.spec.name, "stopped while starting"
                 ) from None
             supervised = False
+            monitor_failed = False
             try:
                 with self._lock:
                     if not self._stopping.is_set():
@@ -1012,7 +1013,12 @@ class SupervisedWorker:
                         try:
                             monitor.start()
                         except BaseException:
-                            self._worker, self._monitor = None, None
+                            # start() may raise after the thread was launched.
+                            # Cancel under the publication lock before it can
+                            # mistake failed-start cleanup for a crash to restart.
+                            self._stopping.set()
+                            self._worker = None
+                            monitor_failed = True
                             raise
                         # From here on the monitor owns the worker, even if it
                         # exits and is replaced before start() returns.
@@ -1021,7 +1027,17 @@ class SupervisedWorker:
                 if not supervised:
                     # Stopped meanwhile, or interrupted (no thread left, a signal
                     # handler raising): nothing else would ever stop this worker.
-                    worker.terminate(timeout=1.0)
+                    try:
+                        worker.terminate(timeout=1.0)
+                    finally:
+                        if monitor_failed:
+                            # Never join under _lock: a launched monitor may be
+                            # waiting for it. A thread that never started cannot
+                            # be joined; it has no ident.
+                            if monitor.ident is not None:
+                                monitor.join()
+                            self._monitor = None
+                            self._close_wake_pipe()
             if not supervised or self._stopping.is_set():
                 raise WorkerStartError(self.spec.name, "stopped while starting")
         finally:
@@ -1257,12 +1273,14 @@ class WorkerSupervisor:
         """
         Stop every worker, in parallel. Safe to call more than once.
         """
-        with _RUNNING_LOCK:
-            _RUNNING_SUPERVISORS.discard(self)
         _stop_all(
             list(self._workers.values()),
             self.stop_timeout if timeout is None else timeout,
         )
+        # Keep exit cleanup available if a signal interrupts starting the stop
+        # threads or waiting for them.
+        with _RUNNING_LOCK:
+            _RUNNING_SUPERVISORS.discard(self)
 
     def _terminate(self) -> None:
         for worker in self._workers.values():
