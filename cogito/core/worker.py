@@ -859,9 +859,17 @@ class SupervisedWorker:
         stopping, worker = self._begin_stop()
         if not stopping:
             return
-        if worker is not None:
-            worker.stop(timeout)
-        self._close_wake_pipe()
+        try:
+            if worker is not None:
+                try:
+                    worker.stop(timeout)
+                except BaseException:
+                    # E.g. no thread left for the polite stop: nothing could reach
+                    # this worker after it.
+                    worker.terminate(timeout)
+                    raise
+        finally:
+            self._close_wake_pipe()
 
     def terminate(self, timeout: float = 10.0) -> None:
         """

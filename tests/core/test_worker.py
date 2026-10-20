@@ -1461,3 +1461,25 @@ def test_a_worker_whose_monitor_cannot_start_is_terminated(
     assert worker.pid is None
     assert not multiprocessing.active_children()
     worker.stop(timeout=5.0)
+
+
+def test_a_worker_is_terminated_when_its_polite_stop_cannot_start(
+    supervision_path, supervised, monkeypatch
+):
+    worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
+    pid = worker.pid
+    real_start = threading.Thread.start
+
+    def start(thread):
+        if thread.name.startswith("cogito-stop-"):
+            raise RuntimeError("can't start new thread")
+        return real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+    with pytest.raises(RuntimeError):
+        worker.stop(timeout=5.0)
+
+    assert not pid_exists(pid)
+    assert not multiprocessing.active_children()
+    assert worker._wake_reader.closed
