@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -339,6 +340,22 @@ IPC_PREDICTORS = {
                 await asyncio.sleep(delay)
                 return value * 2
     """,
+    "cogito_subclass_predictor": """
+        class Score(float):
+            pass
+
+
+        class Label(str):
+            pass
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self) -> dict:
+                return {"score": Score(0.5), "label": Label("cat"), "scores": [Score(1)]}
+    """,
     "cogito_exiting_predictor": """
         import os
 
@@ -515,3 +532,38 @@ def test_stop_waits_for_requests_already_running(ipc_predictors_path):
 def test_concurrency_must_be_positive():
     with pytest.raises(ValueError):
         WorkerSpec(name="toy", class_path="m:P", concurrency=0)
+
+
+def test_scalar_subclasses_from_the_predictor_module_cross_as_plain_data(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "subclass", "cogito_subclass_predictor")
+
+    result = asyncio.run(worker.predict({}))
+
+    assert result == {"score": 0.5, "label": "cat", "scores": [1.0]}
+    assert type(result["score"]) is float and type(result["label"]) is str
+    assert "cogito_subclass_predictor" not in sys.modules
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGSTOP"), reason="needs SIGSTOP")
+def test_a_frozen_worker_times_out_and_still_stops(ipc_predictors_path):
+    worker = spawn_worker(
+        WorkerSpec(name="sleepy", class_path="cogito_sleepy_predictor:Predictor"),
+        start_timeout=60.0,
+    )
+    # A frozen worker stops reading, so a large request fills the pipe and the
+    # send itself blocks.
+    os.kill(worker.pid, signal.SIGSTOP)
+    padding = "x" * (16 * 1024 * 1024)
+
+    async def run():
+        with pytest.raises(WorkerTimeoutError):
+            await worker.predict({"value": 1, "padding": padding}, timeout=0.5)
+        # The send is still blocked here, holding the send lock: stop() must not
+        # wait for it. Killing the worker then fails the blocked send.
+        await asyncio.to_thread(worker.stop, 1.0)
+
+    asyncio.run(asyncio.wait_for(run(), 30.0))
+
+    assert not worker.is_alive()

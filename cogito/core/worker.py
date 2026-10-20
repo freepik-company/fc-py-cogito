@@ -1,6 +1,7 @@
 import asyncio
 import importlib
 import inspect
+import json
 import logging
 import multiprocessing
 import os
@@ -38,6 +39,9 @@ STOP_MESSAGE = "stop"
 #   {"type": "result", "id": str, "status": "ok", "result": Any}
 #   {"type": "result", "id": str, "status": "error", "error_type": str,
 #    "message": str, "traceback": str}
+# Responses travel as JSON text, never pickled: a pickled value may reference a
+# type from the predictor module (even a str/int/float subclass), and unpickling
+# it would import that module in the gateway.
 PREDICT_MESSAGE = "predict"
 RESULT_MESSAGE = "result"
 
@@ -151,15 +155,13 @@ class _EventLoopThread:
 def _handle_request(
     call: Callable[..., Any],
     message: Dict[str, Any],
-    reply: Callable[[Dict[str, Any]], None],
+    reply: Callable[[str], None],
 ) -> None:
     """
     Run one request and send its response, tagged with the request's id
     """
     response = {"type": RESULT_MESSAGE, "id": message["id"]}
     try:
-        # Only plain data goes back: the parent must never unpickle a type defined
-        # in the predictor module, since that would import it in the gateway.
         result = jsonable_encoder(call(**message["inputs"]))
     except Exception as e:
         is_bad_request = isinstance(e, BadRequestError)
@@ -171,7 +173,20 @@ def _handle_request(
         )
     else:
         response.update(status="ok", result=result)
-    reply(response)
+    try:
+        payload = json.dumps(response)
+    except (TypeError, ValueError) as e:
+        payload = json.dumps(
+            {
+                "type": RESULT_MESSAGE,
+                "id": message["id"],
+                "status": "error",
+                "error_type": type(e).__name__,
+                "message": f"Unable to serialise the prediction result: {e}",
+                "traceback": traceback.format_exc(),
+            }
+        )
+    reply(payload)
 
 
 def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
@@ -180,7 +195,7 @@ def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
     """
     send_lock = threading.Lock()
 
-    def reply(response: Dict[str, Any]) -> None:
+    def reply(response: str) -> None:
         # Connection is not thread-safe, and responses come from several threads.
         with send_lock:
             try:
@@ -288,12 +303,10 @@ class PredictorWorker:
         try:
             message = {"type": PREDICT_MESSAGE, "id": request_id, "inputs": inputs}
             try:
-                await asyncio.to_thread(self._send, message)
-            except (BrokenPipeError, OSError) as e:
-                raise WorkerUnavailableError(name, str(e)) from e
-
-            try:
-                response = await asyncio.wait_for(future, timeout)
+                # One deadline for sending the request and waiting for its response.
+                response = await asyncio.wait_for(
+                    self._roundtrip(message, future), timeout
+                )
             except asyncio.TimeoutError:
                 raise WorkerTimeoutError(name, timeout) from None
         finally:
@@ -307,9 +320,24 @@ class PredictorWorker:
             raise BadRequestError(response["message"])
         raise WorkerPredictionError(name, response["message"], response["traceback"])
 
-    def _send(self, message: Dict[str, Any]) -> None:
+    async def _roundtrip(
+        self, message: Dict[str, Any], future: asyncio.Future
+    ) -> Dict[str, Any]:
+        try:
+            await asyncio.to_thread(self._send, message)
+        except (BrokenPipeError, OSError) as e:
+            raise WorkerUnavailableError(self.spec.name, str(e)) from e
+        return await future
+
+    def _send(self, message: Any) -> None:
         with self._send_lock:
             self.conn.send(message)
+
+    def _send_stop(self) -> None:
+        try:
+            self._send(STOP_MESSAGE)
+        except (BrokenPipeError, OSError):
+            pass
 
     def _read_responses(self) -> None:
         """
@@ -321,6 +349,10 @@ class PredictorWorker:
                     message = self.conn.recv()
                 except (EOFError, OSError):
                     break
+                try:
+                    message = json.loads(message)
+                except (TypeError, ValueError):
+                    continue
                 if not isinstance(message, dict) or message.get("type") != (
                     RESULT_MESSAGE
                 ):
@@ -351,13 +383,20 @@ class PredictorWorker:
         """
         Ask the worker to stop, and terminate it if it does not exit in time
         """
+        stopper = None
         if self.process.is_alive():
-            try:
-                self._send(STOP_MESSAGE)
-            except (BrokenPipeError, OSError):
-                pass
+            # Sent from its own thread: a worker that stopped reading can block the
+            # send (or another sender holding the lock), and _reap must still run.
+            stopper = threading.Thread(
+                target=self._send_stop, name=f"cogito-stop-{self.spec.name}"
+            )
+            stopper.daemon = True
+            stopper.start()
         _reap(self.process, timeout)
-        # The worker held the only other end of the pipe, so the reader sees EOF.
+        # Once the worker is gone, blocked sends fail and the reader sees EOF: the
+        # worker held the only other end of the pipe.
+        if stopper is not None:
+            stopper.join(timeout)
         self._reader.join(timeout)
         self.conn.close()
 
