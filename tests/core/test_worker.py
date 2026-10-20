@@ -1483,3 +1483,30 @@ def test_a_worker_is_terminated_when_its_polite_stop_cannot_start(
     assert not pid_exists(pid)
     assert not multiprocessing.active_children()
     assert worker._wake_reader.closed
+
+
+def test_supervisor_terminates_workers_it_cannot_stop_in_parallel(
+    supervision_path, monkeypatch
+):
+    supervisor = WorkerSupervisor(
+        [
+            WorkerSpec(name=name, class_path="cogito_crashy_predictor:Predictor")
+            for name in ("first", "second")
+        ],
+        start_timeout=60.0,
+    )
+    supervisor.start()
+    pids = [worker.pid for worker in supervisor]
+    real_start = threading.Thread.start
+
+    def start(thread):
+        if thread.name == "cogito-stop-supervisor-second":
+            raise RuntimeError("can't start new thread")
+        return real_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+
+    supervisor.stop(timeout=5.0)
+
+    assert not any(pid_exists(pid) for pid in pids)
+    assert not multiprocessing.active_children()

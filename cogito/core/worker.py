@@ -1119,7 +1119,15 @@ def _stop_all(workers: List[SupervisedWorker], timeout: float) -> None:
         )
         for worker in workers
     ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
+    started = []
+    for worker, thread in zip(workers, threads):
+        try:
+            thread.start()
+        except RuntimeError:
+            # E.g. no threads left: stop this one here, the hard way, rather than
+            # leave it running.
+            worker.terminate(timeout)
+        else:
+            started.append(thread)
+    for thread in started:
         thread.join()
