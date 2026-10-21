@@ -1,4 +1,5 @@
 import asyncio
+import atexit
 import functools
 import importlib
 import inspect
@@ -6,15 +7,28 @@ import json
 import logging
 import multiprocessing
 import os
+import signal
 import sys
 import threading
+import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from multiprocessing.connection import Connection
-from typing import Any, Callable, Dict, Iterator, Mapping, Optional, Tuple, Union
+from multiprocessing.connection import Connection, wait
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
@@ -113,6 +127,27 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     """
     Entry point of the worker process
     """
+    # A Ctrl+C in a terminal reaches the whole process group. The gateway drives
+    # the shutdown and stops its workers itself; a worker killed by it would be
+    # taken for a crash and restarted while the gateway shuts down.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    # Its own process group, so the processes its predictor starts can be stopped
+    # with it (see _kill_process_group). Left behind they would be orphans, and
+    # keep the worker's pipes open after it is gone.
+    if hasattr(os, "setpgrp"):
+        os.setpgrp()
+    # The pipe only tells a worker reading requests that its gateway is gone. One
+    # loading its predictor, or draining requests after a stop, must notice too.
+    # The pid multiprocessing recorded at spawn: os.getppid() would already be the
+    # adopter if the gateway died while this worker bootstrapped.
+    gateway = multiprocessing.parent_process()
+    threading.Thread(
+        target=_watch_gateway,
+        args=(gateway.pid if gateway is not None else os.getppid(),),
+        name="cogito-worker-gateway-watch",
+        daemon=True,
+    ).start()
+
     # The worker already starts with this env (see _spawn_environ); applying it
     # again keeps it in place before the predictor import however it was started.
     os.environ.update(env)
@@ -120,27 +155,83 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     try:
         predictor = _load_predictor(spec.class_path)
     except BaseException:
-        conn.send(
-            {
-                "status": "error",
-                "pid": os.getpid(),
-                "error": traceback.format_exc(),
-            }
-        )
+        try:
+            conn.send(
+                {
+                    "status": "error",
+                    "pid": os.getpid(),
+                    "error": traceback.format_exc(),
+                }
+            )
+        except OSError:
+            # The gateway is gone already: nobody would stop what the failed load
+            # may have started.
+            _exit_with_process_group()
         conn.close()
         sys.exit(1)
 
-    conn.send(
-        {
-            "status": "ready",
-            "pid": os.getpid(),
-            "env": {key: os.environ.get(key) for key in env},
-            "predictor": f"{type(predictor).__module__}.{type(predictor).__qualname__}",
-        }
-    )
+    try:
+        conn.send(
+            {
+                "status": "ready",
+                "pid": os.getpid(),
+                "env": {key: os.environ.get(key) for key in env},
+                "predictor": f"{type(predictor).__module__}.{type(predictor).__qualname__}",
+            }
+        )
+    except OSError:
+        # The gateway is gone already.
+        _exit_with_process_group()
 
-    _serve(spec, predictor, conn)
+    try:
+        _serve(spec, predictor, conn)
+    except BaseException:
+        _logger.critical("Worker loop failed", exc_info=True)
+        _exit_with_process_group()
     conn.close()
+    _stop_own_process_group()
+
+
+def _stop_own_process_group() -> None:
+    """
+    Stop the processes the predictor started, before the worker exits.
+
+    The gateway does it once it reaps the worker, but a gateway that was killed
+    never will: only the worker, seeing its pipe close, knows it must clean up.
+    """
+    if not hasattr(os, "killpg") or os.getpgrp() != os.getpid():
+        return
+    # The worker leads the group: it ignores the signal it sends to the rest.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    os.killpg(os.getpgrp(), signal.SIGTERM)
+
+
+def _watch_gateway(gateway_pid: int) -> None:
+    """
+    Exit with the process group as soon as the gateway is gone: the worker is then
+    adopted by another process.
+    """
+    while os.getppid() == gateway_pid:
+        time.sleep(_GATEWAY_CHECK_INTERVAL)
+    _exit_with_process_group()
+
+
+# How often a worker checks that its gateway is still alive.
+_GATEWAY_CHECK_INTERVAL = 1.0
+
+
+def _exit_with_process_group() -> None:
+    """
+    Exit at once, together with every process the predictor started.
+
+    For a worker whose gateway is gone: nobody can receive the responses of the
+    requests still running, and nobody is left to stop what keeps running, so
+    neither the requests nor processes that ignore SIGTERM are waited for.
+    """
+    if hasattr(os, "killpg") and os.getpgrp() == os.getpid():
+        # This worker included.
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    os._exit(1)
 
 
 class _EventLoopThread:
@@ -299,8 +390,10 @@ def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
         while True:
             try:
                 message = conn.recv()
-            except EOFError:
-                break
+            except (EOFError, OSError):
+                # The gateway is gone, maybe halfway through a message: only an
+                # explicit stop drains the requests still running.
+                _exit_with_process_group()
             if message == STOP_MESSAGE:
                 break
             if not isinstance(message, dict):
@@ -481,15 +574,25 @@ class PredictorWorker:
                 _call_soon(loop, _set_future_result, future, message)
         finally:
             # The worker is gone: fail what is still waiting instead of hanging.
-            with self._pending_lock:
-                self._closed = True
-                pending = list(self._pending.values())
-                self._pending.clear()
-            for loop, future in pending:
-                error = WorkerUnavailableError(
-                    self.spec.name, "worker exited before responding"
-                )
-                _call_soon(loop, _set_future_exception, future, error)
+            self._fail_pending()
+
+    def _fail_pending(self) -> None:
+        """
+        Fail every request still waiting, and refuse new ones.
+
+        The reader does it on EOF. That EOF never comes while a process the
+        predictor forked still holds the worker's end of the pipe, so stop() and
+        terminate() do it too once the worker is gone.
+        """
+        with self._pending_lock:
+            self._closed = True
+            pending = list(self._pending.values())
+            self._pending.clear()
+        for loop, future in pending:
+            error = WorkerUnavailableError(
+                self.spec.name, "worker exited before responding"
+            )
+            _call_soon(loop, _set_future_exception, future, error)
 
     def stop(self, timeout: float = 10.0) -> None:
         """
@@ -513,6 +616,26 @@ class PredictorWorker:
             stopper.join(timeout)
         self._sender.shutdown(wait=False, cancel_futures=True)
         self._reader.join(timeout)
+        self._fail_pending()
+        self.conn.close()
+
+    def terminate(self, timeout: float = 10.0) -> None:
+        """
+        Terminate the worker without asking it first, and without starting a thread.
+
+        For interpreter exit, where Python 3.12 refuses to start threads and nobody
+        waits for the requests in flight any more.
+        """
+        if self.process.is_alive():
+            self.process.terminate()
+        _join(self.process, timeout)
+        if self.process.is_alive():
+            self.process.kill()
+            self.process.join()
+        _kill_process_group(self.process)
+        self._sender.shutdown(wait=False, cancel_futures=True)
+        self._reader.join(timeout)
+        self._fail_pending()
         self.conn.close()
 
 
@@ -549,13 +672,51 @@ def _set_future_exception(future: asyncio.Future, error: BaseException) -> None:
 
 
 def _reap(process: multiprocessing.process.BaseProcess, timeout: float) -> None:
-    process.join(timeout)
+    _join(process, timeout)
     if process.is_alive():
         process.terminate()
-        process.join(timeout)
+        _join(process, timeout)
     if process.is_alive():
         process.kill()
         process.join()
+    _kill_process_group(process)
+
+
+def _join(process: multiprocessing.process.BaseProcess, timeout: float) -> None:
+    """
+    process.join(timeout), without relying on the process sentinel alone.
+
+    The sentinel is a pipe, and a process the predictor forked inherits it: it
+    stays open after the worker exited, and join() would wait the whole timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while process.is_alive():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        wait([process.sentinel], min(remaining, _JOIN_POLL_INTERVAL))
+    process.join()
+
+
+# How often a join checks whether the process exited, besides its sentinel.
+_JOIN_POLL_INTERVAL = 0.05
+
+
+def _kill_process_group(process: multiprocessing.process.BaseProcess) -> None:
+    """
+    Kill what is left of a stopped worker's process group: the processes its
+    predictor started, which would otherwise outlive it holding its pipes open.
+
+    The group id is the worker's pid. While a member is alive the group keeps that
+    id from being reused, and with no member left there is nothing to kill.
+    """
+    if not hasattr(os, "killpg") or process.pid is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # No member left, or the worker died before creating its group.
+        pass
 
 
 @contextmanager
@@ -588,6 +749,22 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
     only inside the worker.
     Raises WorkerStartError if the predictor cannot be loaded in time.
     """
+    return _spawn(spec, start_timeout)
+
+
+class _SpawnAborted(Exception):
+    """The start of a worker was abandoned because its supervisor is stopping"""
+
+
+def _spawn(
+    spec: WorkerSpec, start_timeout: float, abort: Optional[Connection] = None
+) -> PredictorWorker:
+    """
+    spawn_worker, giving up as soon as abort becomes readable.
+
+    Loading a predictor can take minutes; a supervisor that is stopping must not
+    wait for it, nor leave the half-started process behind.
+    """
     env = build_worker_env(spec)
     # The spec is pickled to reach the worker: copy env into a plain dict, since
     # some Mapping types (e.g. MappingProxyType) cannot be pickled.
@@ -604,17 +781,29 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
     child_conn.close()
 
     try:
-        if not parent_conn.poll(start_timeout):
+        deadline = time.monotonic() + start_timeout
+        ready = wait(
+            [parent_conn] + ([abort] if abort is not None else []), start_timeout
+        )
+        if parent_conn not in ready and ready:
+            raise _SpawnAborted()
+        if not ready:
             raise WorkerStartError(
                 spec.name, f"predictor not loaded after {start_timeout}s"
             )
-        handshake = parent_conn.recv()
+        handshake = _recv_handshake(
+            spec, parent_conn, process, abort, deadline, start_timeout
+        )
     except EOFError:
         _reap(process, timeout=10.0)
         parent_conn.close()
         raise WorkerStartError(
             spec.name, f"worker exited with code {process.exitcode}"
         ) from None
+    except _SpawnAborted:
+        _reap(process, timeout=1.0)
+        parent_conn.close()
+        raise
     except BaseException:
         _reap(process, timeout=0)
         parent_conn.close()
@@ -625,4 +814,577 @@ def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWor
         parent_conn.close()
         raise WorkerStartError(spec.name, handshake.get("error", "unknown error"))
 
-    return PredictorWorker(spec, env, process, parent_conn, handshake)
+    try:
+        return PredictorWorker(spec, env, process, parent_conn, handshake)
+    except BaseException:
+        # Nothing tracks the process yet: a supervisor retrying the start would
+        # pile up live workers that neither stop() nor the exit hook can see.
+        _reap(process, timeout=0)
+        parent_conn.close()
+        raise
+
+
+def _recv_handshake(
+    spec: WorkerSpec,
+    conn: Connection,
+    process: multiprocessing.process.BaseProcess,
+    abort: Optional[Connection],
+    deadline: float,
+    start_timeout: float,
+) -> Any:
+    """
+    conn.recv(), still giving up on abort or at the deadline.
+
+    wait() only says that the handshake started to arrive: a worker that froze
+    halfway through sending it would block recv() for good. A guard kills it in
+    that case, so recv() sees EOF.
+    """
+    done_reader, done_writer = _MP_CONTEXT.Pipe(duplex=False)
+    outcome: List[str] = []
+
+    def guard() -> None:
+        remaining = max(deadline - time.monotonic(), 0)
+        ready = wait([done_reader] + ([abort] if abort is not None else []), remaining)
+        if done_reader not in ready:
+            outcome.append("aborted" if ready else "timed out")
+            # The whole group: a helper the predictor forked holds the pipe too,
+            # and recv() would wait for it. The worker is not reaped yet, so its
+            # pid still names its group.
+            _kill_process_group(process)
+            process.kill()
+
+    thread = threading.Thread(
+        target=guard, name=f"cogito-handshake-{spec.name}", daemon=True
+    )
+    thread.start()
+    try:
+        try:
+            handshake = conn.recv()
+        except (EOFError, OSError):
+            # OSError when the worker died halfway through the message.
+            handshake = None
+    finally:
+        done_writer.send(None)
+        thread.join()
+        done_writer.close()
+        done_reader.close()
+    # Decided after the guard is done: it may have killed the worker right after
+    # a complete handshake arrived.
+    if outcome == ["aborted"]:
+        raise _SpawnAborted()
+    if outcome:
+        raise WorkerStartError(
+            spec.name, f"predictor not loaded after {start_timeout}s"
+        )
+    if handshake is None:
+        raise EOFError
+    return handshake
+
+
+@dataclass(frozen=True)
+class RestartPolicy:
+    """
+    When a supervisor restarts a worker that exited on its own.
+
+    The n-th consecutive restart waits initial_delay * multiplier**n seconds, capped
+    at max_delay. A worker that stayed up for reset_after seconds before exiting
+    starts the sequence again. After max_restarts consecutive restarts the worker
+    is given up on; None never gives up.
+    """
+
+    initial_delay: float = 1.0
+    max_delay: float = 60.0
+    multiplier: float = 2.0
+    reset_after: float = 60.0
+    max_restarts: Optional[int] = None
+
+    def __post_init__(self):
+        if self.initial_delay < 0:
+            raise ValueError(
+                f"initial_delay must not be negative, got {self.initial_delay}"
+            )
+        if self.max_delay < self.initial_delay:
+            raise ValueError(
+                f"max_delay must be at least initial_delay, got {self.max_delay}"
+            )
+        if self.multiplier < 1:
+            raise ValueError(f"multiplier must be at least 1, got {self.multiplier}")
+        if self.reset_after < 0:
+            raise ValueError(
+                f"reset_after must not be negative, got {self.reset_after}"
+            )
+        if self.max_restarts is not None and self.max_restarts < 0:
+            raise ValueError(
+                f"max_restarts must not be negative, got {self.max_restarts}"
+            )
+
+    def delay(self, attempt: int) -> float:
+        """
+        Seconds to wait before the restart number attempt, counting from 0
+        """
+        if self.initial_delay == 0:
+            # Before the power, which can overflow for a large attempt.
+            return 0.0
+        try:
+            delay = self.initial_delay * self.multiplier**attempt
+        except OverflowError:
+            return self.max_delay
+        return min(delay, self.max_delay)
+
+
+# How often a supervisor checks that its worker is still alive, besides waking up
+# on its exit.
+_EXIT_CHECK_INTERVAL = 1.0
+
+
+class SupervisedWorker:
+    """
+    Keeps the worker of one predictor running.
+
+    A monitor thread waits for the worker process to exit. When it exits on its own,
+    the requests it had in flight fail with WorkerUnavailableError (see
+    PredictorWorker), and the worker is started again following the restart
+    policy. Requests made while it is down fail at once instead of waiting.
+    """
+
+    def __init__(
+        self,
+        spec: WorkerSpec,
+        policy: Optional[RestartPolicy] = None,
+        start_timeout: float = 120.0,
+    ):
+        self.spec = spec
+        self.policy = policy or RestartPolicy()
+        self.start_timeout = start_timeout
+        self.restarts = 0
+        self._worker: Optional[PredictorWorker] = None
+        self._lock = threading.Lock()
+        self._stopping = threading.Event()
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_complete = False
+        self._stopping_worker: Optional[PredictorWorker] = None
+        self._gave_up = False
+        # Written once by stop() and never read: once readable, it wakes the
+        # monitor from whatever it waits on (the worker's exit or a start).
+        self._wake_reader, self._wake_writer = _MP_CONTEXT.Pipe(duplex=False)
+        self._monitor: Optional[threading.Thread] = None
+        self._monitor_done = threading.Event()
+        self._started = False
+        self._start_done = threading.Event()
+
+    @property
+    def pid(self) -> Optional[int]:
+        with self._lock:
+            return self._worker.pid if self._worker is not None else None
+
+    def is_available(self) -> bool:
+        with self._lock:
+            return self._worker is not None and self._worker.is_alive()
+
+    def start(self) -> None:
+        """
+        Start the worker and its monitor.
+
+        Raises WorkerStartError if the first start fails: that is a broken
+        predictor, not a crash, and is not retried. A stop() meanwhile abandons it.
+        """
+        owns_start = False
+        try:
+            with self._lock:
+                if self._started or self._stopping.is_set():
+                    raise RuntimeError(
+                        f"Worker for predictor {self.spec.name} already started"
+                    )
+                self._start_done.clear()
+                owns_start = True
+                self._started = True
+            try:
+                worker = _spawn(self.spec, self.start_timeout, abort=self._wake_reader)
+            except _SpawnAborted:
+                raise WorkerStartError(
+                    self.spec.name, "stopped while starting"
+                ) from None
+            supervised = False
+            monitor_failed = False
+            try:
+                with self._lock:
+                    if not self._stopping.is_set():
+                        monitor = threading.Thread(
+                            target=self._run_monitor,
+                            args=(worker,),
+                            name=f"cogito-supervisor-{self.spec.name}",
+                            daemon=True,
+                        )
+                        # Published first, so that from here on stop() finds it.
+                        try:
+                            self._worker, self._monitor = worker, monitor
+                            monitor.start()
+                            # Include ownership transfer in this guard: SIGINT
+                            # can arrive after Thread.start() returns.
+                            supervised = True
+                        except BaseException:
+                            # start() may raise after the thread was launched.
+                            # Cancel under the publication lock before it can
+                            # mistake failed-start cleanup for a crash to restart.
+                            self._stopping.set()
+                            self._worker = None
+                            supervised = False
+                            monitor_failed = True
+                            raise
+            finally:
+                if not supervised:
+                    # Stopped meanwhile, or interrupted (no thread left, a signal
+                    # handler raising): nothing else would ever stop this worker.
+                    try:
+                        worker.terminate(timeout=1.0)
+                    finally:
+                        if monitor_failed:
+                            # Never join under _lock: a launched monitor may be
+                            # waiting for it. A thread that never started cannot
+                            # be joined; it has no ident.
+                            if monitor.ident is not None:
+                                self._wait_monitor()
+                            self._monitor = None
+                            self._close_wake_pipe()
+            if not supervised or self._stopping.is_set():
+                raise WorkerStartError(self.spec.name, "stopped while starting")
+        finally:
+            # stop() waits for this before it joins the monitor and closes the pipe
+            # the start waits on.
+            if owns_start:
+                self._start_done.set()
+
+    async def predict(
+        self,
+        inputs: Union[BaseModel, Mapping[str, Any]],
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """
+        Run a prediction in the current worker, see PredictorWorker.predict.
+
+        Raises WorkerUnavailableError at once while the worker is being restarted.
+        """
+        with self._lock:
+            worker = self._worker
+            if worker is None:
+                if self._stopping.is_set() or self._monitor is None:
+                    detail = "worker is not running"
+                elif self._gave_up:
+                    detail = "worker crashed and is no longer restarted"
+                else:
+                    detail = "worker is restarting"
+                raise WorkerUnavailableError(self.spec.name, detail)
+        return await worker.predict(inputs, timeout)
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """
+        Stop the worker for good: it is not restarted, and a start in progress is
+        abandoned. Safe to call more than once.
+        """
+        with self._shutdown_lock:
+            stopping, worker = self._begin_stop()
+            if not stopping:
+                return
+            if worker is not None:
+                try:
+                    worker.stop(timeout)
+                except BaseException:
+                    # Retain ownership if even termination is interrupted, so a
+                    # later stop or interpreter-exit cleanup can finish it.
+                    worker.terminate(timeout)
+                    self._finish_stop()
+                    raise
+            self._finish_stop()
+
+    def terminate(self, timeout: float = 10.0) -> None:
+        """
+        stop(), terminating the worker without asking it first and without starting
+        a thread: see PredictorWorker.terminate.
+        """
+        with self._shutdown_lock:
+            stopping, worker = self._begin_stop()
+            if not stopping:
+                return
+            if worker is not None:
+                worker.terminate(timeout)
+            self._finish_stop()
+
+    def _finish_stop(self) -> None:
+        self._close_wake_pipe()
+        self._stopping_worker = None
+        self._shutdown_complete = True
+
+    def _begin_stop(self) -> Tuple[bool, Optional[PredictorWorker]]:
+        """
+        Stop restarting the worker and wait for the monitor and any start to end.
+
+        Called with _shutdown_lock held, so cleanup attempts cannot race. A
+        previous attempt may have been interrupted: keep its worker recoverable
+        until _finish_stop confirms that cleanup completed.
+        """
+        with self._lock:
+            if self._shutdown_complete:
+                return False, None
+            if not self._stopping.is_set():
+                # Preserve the handle before marking shutdown as started.
+                self._stopping_worker = self._worker
+                self._stopping.set()
+                self._worker = None
+            worker = self._stopping_worker
+            started = self._started
+        try:
+            self._wake_writer.send(None)
+        except (BrokenPipeError, OSError):
+            pass
+        if started:
+            # A first start in progress sees the wake-up and gives up.
+            self._start_done.wait()
+        if self._monitor is not None:
+            self._wait_monitor()
+        return True, worker
+
+    def _wait_monitor(self) -> None:
+        self._monitor.join()
+        # An interrupted Thread.join() can mark a running thread as stopped on
+        # some CPython versions. Only the target's finally proves it is done
+        # using the wake pipe and any unpublished replacement worker.
+        self._monitor_done.wait()
+
+    def _run_monitor(self, worker: PredictorWorker) -> None:
+        try:
+            if not self._stopping.is_set():
+                self._watch(worker)
+        finally:
+            self._monitor_done.set()
+
+    def _close_wake_pipe(self) -> None:
+        self._wake_writer.close()
+        self._wake_reader.close()
+
+    def _watch(self, worker: PredictorWorker) -> None:
+        attempt = 0
+        while True:
+            started_at = time.monotonic()
+            # The sentinel alone is not enough: a process the predictor forked
+            # inherits the pipe behind it and keeps it open after the worker died.
+            while not self._stopping.is_set() and worker.process.is_alive():
+                wait(
+                    [worker.process.sentinel, self._wake_reader],
+                    _EXIT_CHECK_INTERVAL,
+                )
+            if self._stopping.is_set():
+                return
+            uptime = time.monotonic() - started_at
+            with self._lock:
+                if self._worker is worker:
+                    self._worker = None
+            # The process is gone: this only reaps it and lets the reader thread
+            # fail the requests it had in flight.
+            worker.stop(timeout=1.0)
+            _logger.error(
+                "Worker exited unexpectedly",
+                extra={
+                    "predictor": self.spec.name,
+                    "pid": worker.pid,
+                    "exitcode": worker.process.exitcode,
+                    "uptime": round(uptime, 3),
+                },
+            )
+            if uptime >= self.policy.reset_after:
+                attempt = 0
+
+            worker, attempt = self._restart(attempt)
+            if worker is None:
+                return
+
+    def _restart(self, attempt: int) -> Tuple[Optional[PredictorWorker], int]:
+        """
+        Start the worker again, backing off between failed starts.
+
+        Returns the new worker, or None if the supervisor stopped or gave up, and
+        the number of consecutive restarts so far.
+        """
+        while True:
+            max_restarts = self.policy.max_restarts
+            if max_restarts is not None and attempt >= max_restarts:
+                with self._lock:
+                    self._gave_up = True
+                _logger.critical(
+                    "Worker is no longer restarted",
+                    extra={"predictor": self.spec.name, "restarts": attempt},
+                )
+                return None, attempt
+            delay = self.policy.delay(attempt)
+            attempt += 1
+            _logger.warning(
+                "Restarting worker",
+                extra={
+                    "predictor": self.spec.name,
+                    "attempt": attempt,
+                    "delay": delay,
+                },
+            )
+            if self._stopping.wait(delay):
+                return None, attempt
+            try:
+                worker = _spawn(self.spec, self.start_timeout, abort=self._wake_reader)
+            except _SpawnAborted:
+                return None, attempt
+            except Exception as e:
+                # Anything else (e.g. no file descriptors left) is retried too: a
+                # monitor that died here would leave the worker down for good.
+                is_start_error = isinstance(e, WorkerStartError)
+                _logger.error(
+                    "Unable to restart worker",
+                    extra={
+                        "predictor": self.spec.name,
+                        "error": e.detail if is_start_error else str(e),
+                    },
+                    exc_info=not is_start_error,
+                )
+                continue
+            with self._lock:
+                if self._stopping.is_set():
+                    stopped = True
+                else:
+                    stopped = False
+                    self._worker = worker
+                    self.restarts += 1
+            if stopped:
+                # Without a thread: this may run while the interpreter exits.
+                worker.terminate(timeout=1.0)
+                return None, attempt
+            return worker, attempt
+
+
+class WorkerSupervisor:
+    """
+    The supervised workers of every predictor, started and stopped together.
+
+    Once started, the workers are also stopped when the interpreter exits, so a
+    gateway that returns without calling stop() (e.g. uvicorn after SIGTERM) leaves
+    no worker behind.
+    """
+
+    def __init__(
+        self,
+        specs: Iterable[WorkerSpec],
+        policy: Optional[RestartPolicy] = None,
+        start_timeout: float = 120.0,
+        stop_timeout: float = 10.0,
+    ):
+        self.stop_timeout = stop_timeout
+        self._workers: Dict[str, SupervisedWorker] = {}
+        for spec in specs:
+            if spec.name in self._workers:
+                raise ValueError(f"Duplicated predictor name: {spec.name}")
+            self._workers[spec.name] = SupervisedWorker(spec, policy, start_timeout)
+
+    def __getitem__(self, name: str) -> SupervisedWorker:
+        return self._workers[name]
+
+    def __iter__(self) -> Iterator[SupervisedWorker]:
+        return iter(list(self._workers.values()))
+
+    def start(self) -> None:
+        """
+        Start every worker. If one cannot start, the ones already started are
+        stopped and its WorkerStartError is raised.
+        """
+        _register_exit_hook()
+        with _RUNNING_LOCK:
+            _RUNNING_SUPERVISORS.add(self)
+        try:
+            for worker in self._workers.values():
+                worker.start()
+        except BaseException:
+            # Stopping a worker that never started only releases its resources.
+            self.stop()
+            raise
+
+    def stop(self, timeout: Optional[float] = None) -> None:
+        """
+        Stop every worker, in parallel. Safe to call more than once.
+        """
+        _stop_all(
+            list(self._workers.values()),
+            self.stop_timeout if timeout is None else timeout,
+        )
+        # Keep exit cleanup available if a signal interrupts starting the stop
+        # threads or waiting for them.
+        with _RUNNING_LOCK:
+            _RUNNING_SUPERVISORS.discard(self)
+
+    def _terminate(self) -> None:
+        for worker in self._workers.values():
+            worker.terminate(self.stop_timeout)
+
+
+_RUNNING_SUPERVISORS: "set[WorkerSupervisor]" = set()
+_RUNNING_LOCK = threading.Lock()
+_EXIT_HOOK_REGISTERED = False
+
+
+def _register_exit_hook() -> None:
+    """
+    Terminate the workers of every supervisor still running when the interpreter
+    exits.
+
+    Without it, exit would wait forever: ThreadPoolExecutor's exit hook joins a
+    sender blocked on a frozen worker, and multiprocessing's joins the non-daemon
+    workers, which only exit once asked to or once their pipe closes. threading's
+    exit hooks run before both: before the interpreter joins its threads, and in
+    reverse order, so after the ThreadPoolExecutor hook registered on import.
+    """
+    global _EXIT_HOOK_REGISTERED
+    with _RUNNING_LOCK:
+        if _EXIT_HOOK_REGISTERED:
+            return
+        # threading._register_atexit is private CPython API (3.9+). Its hooks run
+        # inside threading._shutdown, before it joins the non-daemon threads,
+        # ThreadPoolExecutor's senders among them. A plain atexit hook only runs
+        # after that join: with a send blocked on a frozen worker, exit would hang
+        # before ever reaching it. The fallback still covers idle workers, so it
+        # is kept, but it is not silent.
+        register = getattr(threading, "_register_atexit", None)
+        if register is None:
+            _logger.warning(
+                "threading._register_atexit is not available: workers are stopped "
+                "from atexit, and exit may hang while a send to a frozen worker "
+                "is blocked"
+            )
+            register = atexit.register
+        register(_terminate_running_supervisors)
+        _EXIT_HOOK_REGISTERED = True
+
+
+def _terminate_running_supervisors() -> None:
+    # No thread is started from here: Python 3.12 refuses them at exit.
+    with _RUNNING_LOCK:
+        supervisors = list(_RUNNING_SUPERVISORS)
+        _RUNNING_SUPERVISORS.clear()
+    for supervisor in supervisors:
+        supervisor._terminate()
+
+
+def _stop_all(workers: List[SupervisedWorker], timeout: float) -> None:
+    threads = [
+        threading.Thread(
+            target=worker.stop,
+            args=(timeout,),
+            name=f"cogito-stop-supervisor-{worker.spec.name}",
+        )
+        for worker in workers
+    ]
+    started = []
+    for worker, thread in zip(workers, threads):
+        try:
+            thread.start()
+        except RuntimeError:
+            # E.g. no threads left: stop this one here, the hard way, rather than
+            # leave it running.
+            worker.terminate(timeout)
+        else:
+            started.append(thread)
+    for thread in started:
+        thread.join()
