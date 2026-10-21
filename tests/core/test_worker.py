@@ -165,6 +165,14 @@ LAUNCHER = textwrap.dedent(
 )
 
 
+@pytest.fixture(autouse=True)
+def no_mps_daemon(tmp_path_factory, monkeypatch):
+    # Workers detect MPS by default: keep a daemon on the test host out of it.
+    monkeypatch.setenv(
+        "CUDA_MPS_PIPE_DIRECTORY", str(tmp_path_factory.mktemp("no-mps"))
+    )
+
+
 @pytest.fixture
 def predictors_path(tmp_path, monkeypatch):
     """
@@ -382,6 +390,186 @@ def test_build_worker_env_sets_no_mps_cap_when_resource_variables_hide_the_gpus(
     )
 
     assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in build_worker_env(spec)
+
+
+@pytest.fixture
+def mps_pipe_directory(tmp_path, monkeypatch):
+    # Where the MPS control daemon of these tests listens.
+    directory = tmp_path / "mps"
+    directory.mkdir()
+    os.mkfifo(directory / "control")
+    monkeypatch.setenv("CUDA_MPS_PIPE_DIRECTORY", str(directory))
+    return directory
+
+
+def test_build_worker_env_sets_the_compute_share_through_mps():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="1",
+        gpu_compute=0.25,
+        mps=True,
+    )
+
+    assert build_worker_env(spec)["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] == "25"
+
+
+def test_build_worker_env_sets_no_compute_share_without_mps():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="1",
+        gpu_compute=0.25,
+        mps=False,
+    )
+
+    assert "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE" not in build_worker_env(spec)
+
+
+def test_build_worker_env_detects_a_running_mps_daemon(mps_pipe_directory):
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="2",
+        gpu_memory_limit=1024**3,
+        gpu_compute=0.5,
+    )
+
+    env = build_worker_env(spec)
+
+    assert env["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] == "50"
+    assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=1024MB"
+
+
+def test_build_worker_env_detects_no_mps_daemon(mps_pipe_directory):
+    (mps_pipe_directory / "control").unlink()
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="2",
+        gpu_memory_limit=1024**3,
+        gpu_compute=0.5,
+    )
+
+    env = build_worker_env(spec)
+
+    assert "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE" not in env
+    assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in env
+    assert env["COGITO_GPU_MEMORY_LIMIT"] == str(1024**3)
+
+
+def test_build_worker_env_lets_mps_false_override_the_detection(mps_pipe_directory):
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="2",
+        gpu_compute=0.5,
+        mps=False,
+    )
+
+    assert "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE" not in build_worker_env(spec)
+
+
+def test_build_worker_env_detects_mps_through_the_worker_pipe_directory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CUDA_MPS_PIPE_DIRECTORY", str(tmp_path / "nothing-here"))
+    os.mkfifo(tmp_path / "control")
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="0",
+        gpu_compute=0.5,
+        env={"CUDA_MPS_PIPE_DIRECTORY": str(tmp_path)},
+    )
+
+    assert build_worker_env(spec)["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] == "50"
+
+
+def test_build_worker_env_skips_the_detection_without_gpu_limits(monkeypatch):
+    def fail(*args):
+        raise AssertionError("MPS detection is not needed")
+
+    monkeypatch.setattr("cogito.core.worker.mps_running", fail)
+    spec = WorkerSpec(name="sdxl", class_path="m:P", cuda_visible_devices="0")
+
+    env = build_worker_env(spec)
+
+    assert "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE" not in env
+
+
+def test_build_worker_env_sets_the_compute_share_for_every_inherited_gpu(
+    monkeypatch,
+):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    spec = WorkerSpec(name="sdxl", class_path="m:P", gpu_compute=0.5, mps=True)
+
+    assert build_worker_env(spec)["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] == "50"
+
+
+def test_build_worker_env_sets_no_compute_share_when_every_gpu_is_hidden():
+    spec = WorkerSpec(
+        name="clip",
+        class_path="m:P",
+        cuda_visible_devices="",
+        gpu_compute=0.5,
+        mps=True,
+    )
+
+    assert "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE" not in build_worker_env(spec)
+
+
+def test_build_worker_env_lets_resource_variables_override_the_compute_share():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="0",
+        gpu_compute=0.5,
+        mps=True,
+        env={"CUDA_MPS_ACTIVE_THREAD_PERCENTAGE": "10"},
+    )
+
+    assert build_worker_env(spec)["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] == "10"
+
+
+def test_build_worker_env_ignores_the_pipe_directory_of_a_worker_being_started(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CUDA_MPS_PIPE_DIRECTORY", str(tmp_path / "nothing-here"))
+    other = tmp_path / "other"
+    other.mkdir()
+    os.mkfifo(other / "control")
+    spec = WorkerSpec(
+        name="sdxl", class_path="m:P", cuda_visible_devices="0", gpu_compute=0.5
+    )
+    entered, release = threading.Event(), threading.Event()
+
+    def start_another_worker():
+        # What spawning a worker with its own MPS daemon does to this process.
+        with _spawn_environ({"CUDA_MPS_PIPE_DIRECTORY": str(other)}):
+            entered.set()
+            release.wait(5.0)
+
+    starter = threading.Thread(target=start_another_worker)
+    starter.start()
+    assert entered.wait(5.0)
+    built = {}
+    builder = threading.Thread(target=lambda: built.update(build_worker_env(spec)))
+    builder.start()
+    builder.join(0.2)
+    # It waits for the other worker's start instead of reading its pipe directory.
+    assert builder.is_alive()
+    release.set()
+    starter.join(5.0)
+    builder.join(5.0)
+
+    assert "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE" not in built
+
+
+@pytest.mark.parametrize("compute", [0, -0.5, 1.5])
+def test_worker_spec_rejects_a_gpu_compute_outside_zero_to_one(compute):
+    with pytest.raises(ValueError, match="gpu_compute"):
+        WorkerSpec(name="sdxl", class_path="m:P", gpu_compute=compute)
 
 
 @pytest.mark.parametrize("limit", [0, -1, 1024**2 - 1])

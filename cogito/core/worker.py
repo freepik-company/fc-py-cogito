@@ -41,11 +41,16 @@ from cogito.core.exceptions import (
     WorkerUnavailableError,
 )
 from cogito.gpu import (
+    DEFAULT_MPS_PIPE_DIRECTORY,
     GPU_MEMORY_LIMIT_ENV,
     MB,
+    MPS_ACTIVE_THREAD_PERCENTAGE_ENV,
     MPS_PINNED_DEVICE_MEM_LIMIT_ENV,
+    MPS_PIPE_DIRECTORY_ENV,
     apply_memory_limit,
+    format_active_thread_percentage,
     format_pinned_device_mem_limit,
+    mps_running,
 )
 
 # Workers always use the spawn start method: a forked child would inherit any CUDA
@@ -92,9 +97,12 @@ class WorkerSpec:
     cuda_visible_devices is the final value for CUDA_VISIBLE_DEVICES: None inherits
     the parent's value, an empty string hides every GPU (CPU-only placement).
     gpu_memory_limit caps the device memory the worker may allocate, in bytes per
-    visible device (see cogito.gpu). mps says a CUDA MPS daemon serves the worker:
-    only then is the cap enforced by the driver, for every library; otherwise only
-    PyTorch's allocator is capped.
+    visible device (see cogito.gpu). gpu_compute is the worker's share of each
+    visible GPU's streaming multiprocessors, in (0, 1].
+    mps says whether a CUDA MPS daemon serves the worker; None detects it with
+    cogito.gpu.mps_running(). Only with MPS is the memory cap enforced by the
+    driver, for every library (otherwise only PyTorch's allocator is capped), and
+    only with MPS is the compute share enforced at all.
     env holds extra resource variables, applied after the ones cogito sets.
     concurrency is how many requests the worker runs at the same time.
     """
@@ -105,7 +113,8 @@ class WorkerSpec:
     env: Mapping[str, str] = field(default_factory=dict)
     concurrency: int = 1
     gpu_memory_limit: Optional[int] = None
-    mps: bool = False
+    gpu_compute: Optional[float] = None
+    mps: Optional[bool] = None
 
     def __post_init__(self):
         if self.concurrency < 1:
@@ -115,6 +124,23 @@ class WorkerSpec:
                 f"gpu_memory_limit must be at least {MB} bytes (1MB), "
                 f"got {self.gpu_memory_limit}"
             )
+        if self.gpu_compute is not None and not 0 < self.gpu_compute <= 1:
+            raise ValueError(f"gpu_compute must be in (0, 1], got {self.gpu_compute}")
+
+
+def _inherited_env(name: str) -> Optional[str]:
+    # Read under the lock: another worker being started may have changed it.
+    with _SPAWN_ENV_LOCK:
+        return os.environ.get(name)
+
+
+def _serves_mps(spec: WorkerSpec, env: Mapping[str, str]) -> bool:
+    if spec.mps is not None:
+        return spec.mps
+    pipe_directory = env.get(MPS_PIPE_DIRECTORY_ENV)
+    if pipe_directory is None:
+        pipe_directory = _inherited_env(MPS_PIPE_DIRECTORY_ENV)
+    return mps_running(pipe_directory or DEFAULT_MPS_PIPE_DIRECTORY)
 
 
 def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
@@ -132,18 +158,28 @@ def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
     if spec.gpu_memory_limit is not None:
         env[GPU_MEMORY_LIMIT_ENV] = str(spec.gpu_memory_limit)
     env.update(spec.env)
+    if spec.gpu_memory_limit is None and spec.gpu_compute is None:
+        return env
+    if not _serves_mps(spec, env):
+        return env
+    # The CUDA_VISIBLE_DEVICES the worker ends up with: set through spec.env, or
+    # else inherited from this process.
+    devices = env.get("CUDA_VISIBLE_DEVICES")
+    if devices is None:
+        devices = _inherited_env("CUDA_VISIBLE_DEVICES")
+    if (
+        spec.gpu_compute is not None
+        and MPS_ACTIVE_THREAD_PERCENTAGE_ENV not in spec.env
+        and (devices is None or devices.strip())
+    ):
+        env[MPS_ACTIVE_THREAD_PERCENTAGE_ENV] = format_active_thread_percentage(
+            spec.gpu_compute
+        )
     if (
         spec.gpu_memory_limit is not None
-        and spec.mps
         and MPS_PINNED_DEVICE_MEM_LIMIT_ENV not in spec.env
     ):
-        # One entry per device in the CUDA_VISIBLE_DEVICES the worker ends up
-        # with: set through spec.env, or else inherited from this process. Read
-        # under the lock: another worker being started may have changed it.
-        devices = env.get("CUDA_VISIBLE_DEVICES")
-        if devices is None:
-            with _SPAWN_ENV_LOCK:
-                devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        # One entry per device the worker sees.
         if devices is None:
             # Every GPU is visible, and how many there are is unknown here.
             _logger.warning(

@@ -1278,7 +1278,13 @@ This allows you to programmatically check which version of Cogito is being used 
 
 ### GPU Module
 
-The GPU module (`cogito.gpu`) caps the GPU memory (VRAM) a predictor worker can allocate.
+The GPU module (`cogito.gpu`) caps the GPU memory (VRAM) a predictor worker can allocate and its share of the GPU's compute.
+
+#### CUDA MPS Detection
+
+Both limits are enforced best through a CUDA MPS control daemon. `WorkerSpec.mps` says whether one serves the worker: leave it as `None` (the default) and cogito detects it with `cogito.gpu.mps_running()`, or set `True`/`False` to skip the detection.
+
+The control daemon listens on the `control` pipe of its pipe directory: `CUDA_MPS_PIPE_DIRECTORY` (the one in the worker's `WorkerSpec.env`, or else the one cogito inherits), or `/tmp/nvidia-mps` when it is unset. MPS counts as running when that pipe exists; cogito never opens it. A pipe left behind by a daemon that was killed still counts as running. The detection only runs for workers with a memory limit or a compute share.
 
 #### GPU Memory Limit
 
@@ -1301,3 +1307,9 @@ apply_memory_limit(8 * 1024**3)  # 8 GiB on each visible device
 `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` can only lower the limit set by the MPS control daemon, never raise it. Its devices are named by their ordinal inside the worker (`0`, `1`, … in `CUDA_VISIBLE_DEVICES` order), not by the physical index: an entry for a device the worker cannot see makes the driver drop every limit, so every device listed in `CUDA_VISIBLE_DEVICES` must exist. When the worker does not set `CUDA_VISIBLE_DEVICES`, the cap follows the one it inherits; with none at all, the number of visible GPUs is unknown, so no MPS cap is set and a warning is logged.
 
 Other frameworks have their own setting, passed through `WorkerSpec.env`. For example, JAX preallocates a fraction of the device memory, set with `XLA_PYTHON_CLIENT_MEM_FRACTION` (e.g. `"0.5"`); cogito does not set it for you.
+
+#### GPU Compute Share
+
+A worker gets its share of each visible GPU's streaming multiprocessors from `WorkerSpec.gpu_compute`, a fraction in `(0, 1]`. With CUDA MPS, cogito starts the worker with `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` set to that share as a whole percentage, rounded half up and never below 1 (e.g. `0.25` → `25`). Without MPS nothing enforces it, and the variable is not set.
+
+`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` applies to Volta and newer GPUs, and can only lower the default set by the MPS control daemon, never raise it. It is not set for a worker that hides every GPU (`CUDA_VISIBLE_DEVICES=""`), and a value in `WorkerSpec.env` is kept as is.

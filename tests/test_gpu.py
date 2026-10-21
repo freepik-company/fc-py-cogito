@@ -1,13 +1,19 @@
 import logging
+import os
+import socket
 import sys
+import tempfile
 import types
 
 import pytest
 
+from cogito import gpu
 from cogito.gpu import (
     GPU_MEMORY_LIMIT_ENV,
     apply_memory_limit,
+    format_active_thread_percentage,
     format_pinned_device_mem_limit,
+    mps_running,
 )
 
 GB = 1024**3
@@ -153,3 +159,73 @@ def test_apply_memory_limit_logs_a_failure_instead_of_raising(fake_torch, caplog
         assert apply_memory_limit(4 * GB) is False
 
     assert "Unable to cap the PyTorch allocator" in caplog.text
+
+
+def test_mps_running_with_the_control_pipe(tmp_path):
+    os.mkfifo(tmp_path / "control")
+
+    assert mps_running(str(tmp_path)) is True
+
+
+def test_mps_running_with_a_control_socket():
+    # A short directory: a UNIX socket path has a small length limit.
+    with tempfile.TemporaryDirectory(dir="/tmp") as directory:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            server.bind(os.path.join(directory, "control"))
+
+            assert mps_running(directory) is True
+        finally:
+            server.close()
+
+
+def test_mps_running_without_the_control_pipe(tmp_path):
+    assert mps_running(str(tmp_path)) is False
+
+
+def test_mps_running_ignores_a_regular_control_file(tmp_path):
+    (tmp_path / "control").write_text("")
+
+    assert mps_running(str(tmp_path)) is False
+
+
+def test_mps_running_without_the_pipe_directory(tmp_path):
+    assert mps_running(str(tmp_path / "missing")) is False
+
+
+def test_mps_running_reads_the_pipe_directory_from_the_env(tmp_path, monkeypatch):
+    os.mkfifo(tmp_path / "control")
+    monkeypatch.setenv("CUDA_MPS_PIPE_DIRECTORY", str(tmp_path))
+
+    assert mps_running() is True
+
+
+def test_mps_running_defaults_to_the_nvidia_pipe_directory(monkeypatch):
+    monkeypatch.delenv("CUDA_MPS_PIPE_DIRECTORY", raising=False)
+    checked = []
+
+    def fake_stat(path):
+        checked.append(path)
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(gpu.os, "stat", fake_stat)
+
+    assert mps_running() is False
+    assert checked == ["/tmp/nvidia-mps/control"]
+
+
+def test_mps_running_never_raises(monkeypatch):
+    def fake_stat(path):
+        raise PermissionError(path)
+
+    monkeypatch.setattr(gpu.os, "stat", fake_stat)
+
+    assert mps_running("/somewhere") is False
+
+
+@pytest.mark.parametrize(
+    "compute, percentage",
+    [(1.0, "100"), (0.5, "50"), (0.29, "29"), (0.125, "13"), (0.001, "1")],
+)
+def test_format_active_thread_percentage(compute, percentage):
+    assert format_active_thread_percentage(compute) == percentage
