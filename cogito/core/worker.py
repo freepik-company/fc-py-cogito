@@ -113,8 +113,8 @@ class WorkerSpec:
     env: Mapping[str, str] = field(default_factory=dict)
     concurrency: int = 1
     gpu_memory_limit: Optional[int] = None
-    gpu_compute: Optional[float] = None
     mps: Optional[bool] = None
+    gpu_compute: Optional[float] = None
 
     def __post_init__(self):
         if self.concurrency < 1:

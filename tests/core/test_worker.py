@@ -566,6 +566,14 @@ def test_build_worker_env_ignores_the_pipe_directory_of_a_worker_being_started(
     assert "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE" not in built
 
 
+def test_worker_spec_keeps_the_positions_of_its_earlier_fields():
+    spec = WorkerSpec("sdxl", "m:P", "0", {}, 1, 1024**3, False)
+
+    assert spec.gpu_memory_limit == 1024**3
+    assert spec.mps is False
+    assert spec.gpu_compute is None
+
+
 @pytest.mark.parametrize("compute", [0, -0.5, 1.5])
 def test_worker_spec_rejects_a_gpu_compute_outside_zero_to_one(compute):
     with pytest.raises(ValueError, match="gpu_compute"):
