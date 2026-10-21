@@ -2291,6 +2291,18 @@ SETUP_PREDICTORS = {
                     "value": await self.queue.get(),
                 }
     """,
+    # A sync setup() that needs a running loop, as it has in-process.
+    "cogito_sync_setup_async_predict_predictor": """
+        import asyncio
+
+
+        class Predictor:
+            def setup(self):
+                self.loop = asyncio.get_running_loop()
+
+            async def predict(self) -> bool:
+                return asyncio.get_running_loop() is self.loop
+    """,
     "cogito_async_setup_sync_predict_predictor": """
         import asyncio
 
@@ -2359,6 +2371,12 @@ def test_async_setup_shares_the_event_loop_of_predict(setup_path, workers):
         "same_loop": True,
         "value": "from setup",
     }
+
+
+def test_sync_setup_runs_on_the_event_loop_of_an_async_predict(setup_path, workers):
+    worker = start(workers, "sync_setup", "cogito_sync_setup_async_predict_predictor")
+
+    assert asyncio.run(worker.predict({})) is True
 
 
 def test_async_setup_with_a_sync_predict(setup_path, workers):

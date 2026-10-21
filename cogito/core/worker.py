@@ -158,14 +158,14 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
         predictor = _load_predictor(spec.class_path)
         stage = "setup"
         # setup() runs before the worker reports ready. An async predictor sets up
-        # on the event loop its requests will run on, so whatever setup() binds to
-        # the loop (sessions, clients) still works in predict().
+        # on the event loop its requests will run on, even with a sync setup(), as
+        # in-process: whatever setup() binds to the loop (sessions, clients) still
+        # works in predict().
         if inspect.iscoroutinefunction(predictor.setup) or (
             inspect.iscoroutinefunction(predictor.predict)
         ):
             event_loop = _EventLoopThread(f"cogito-worker-{spec.name}-loop")
-        if inspect.iscoroutinefunction(predictor.setup):
-            event_loop.run(predictor.setup())
+            event_loop.run(_setup_on_loop(predictor))
         else:
             predictor.setup()
     except BaseException:
@@ -205,6 +205,13 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
         _exit_with_process_group()
     conn.close()
     _stop_own_process_group()
+
+
+async def _setup_on_loop(predictor: Any) -> None:
+    if inspect.iscoroutinefunction(predictor.setup):
+        await predictor.setup()
+    else:
+        predictor.setup()
 
 
 def _stop_own_process_group() -> None:
