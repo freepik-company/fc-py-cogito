@@ -75,6 +75,11 @@ def apply_memory_limit(limit_bytes: Optional[int] = None) -> bool:
         import torch
     except ImportError:
         return False
+    except Exception:
+        # An installed but broken torch (e.g. a missing shared library) must not
+        # stop a predictor that may not even use it.
+        _logger.warning("Unable to import torch", exc_info=True)
+        return False
 
     try:
         if not torch.cuda.is_available():

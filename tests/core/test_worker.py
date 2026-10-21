@@ -300,6 +300,35 @@ def test_build_worker_env_lets_resource_variables_override_the_mps_cap():
     assert build_worker_env(spec)["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=512MB"
 
 
+def test_build_worker_env_caps_the_devices_set_through_resource_variables():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="GPU-aaaa",
+        gpu_memory_limit=1024**3,
+        mps=True,
+        env={"CUDA_VISIBLE_DEVICES": "GPU-bbbb"},
+    )
+
+    env = build_worker_env(spec)
+
+    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-bbbb"
+    assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "GPU-bbbb=1024MB"
+
+
+def test_build_worker_env_sets_no_mps_cap_when_resource_variables_hide_the_gpus():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="0",
+        gpu_memory_limit=1024**3,
+        mps=True,
+        env={"CUDA_VISIBLE_DEVICES": ""},
+    )
+
+    assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in build_worker_env(spec)
+
+
 @pytest.mark.parametrize("limit", [0, -1, 1024**2 - 1])
 def test_worker_spec_rejects_a_gpu_memory_limit_below_one_megabyte(limit):
     with pytest.raises(ValueError, match="gpu_memory_limit"):

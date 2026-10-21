@@ -131,13 +131,19 @@ def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
         env["CUDA_VISIBLE_DEVICES"] = spec.cuda_visible_devices
     if spec.gpu_memory_limit is not None:
         env[GPU_MEMORY_LIMIT_ENV] = str(spec.gpu_memory_limit)
-        # The devices are named as in CUDA_VISIBLE_DEVICES: without them there is
-        # no device to cap.
-        if spec.mps and spec.cuda_visible_devices:
-            env[MPS_PINNED_DEVICE_MEM_LIMIT_ENV] = format_pinned_device_mem_limit(
-                spec.cuda_visible_devices, spec.gpu_memory_limit
-            )
     env.update(spec.env)
+    # The devices are named as in the CUDA_VISIBLE_DEVICES the worker ends up with,
+    # even one set through spec.env: without them there is no device to cap.
+    devices = env.get("CUDA_VISIBLE_DEVICES")
+    if (
+        spec.gpu_memory_limit is not None
+        and spec.mps
+        and devices
+        and MPS_PINNED_DEVICE_MEM_LIMIT_ENV not in spec.env
+    ):
+        env[MPS_PINNED_DEVICE_MEM_LIMIT_ENV] = format_pinned_device_mem_limit(
+            devices, spec.gpu_memory_limit
+        )
     return env
 
 

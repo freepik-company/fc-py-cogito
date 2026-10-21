@@ -117,6 +117,19 @@ def test_apply_memory_limit_without_torch_does_nothing(monkeypatch):
     assert apply_memory_limit(4 * GB) is False
 
 
+def test_apply_memory_limit_survives_a_broken_torch_import(
+    tmp_path, monkeypatch, caplog
+):
+    (tmp_path / "torch.py").write_text("raise OSError('libcudart.so: not found')\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+
+    with caplog.at_level(logging.WARNING, logger="cogito.gpu"):
+        assert apply_memory_limit(4 * GB) is False
+
+    assert "Unable to import torch" in caplog.text
+
+
 def test_apply_memory_limit_without_cuda_does_nothing(fake_torch):
     cuda = fake_torch([16 * GB], available=False)
 
