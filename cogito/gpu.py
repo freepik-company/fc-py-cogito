@@ -1,5 +1,5 @@
 """
-GPU memory cap of a predictor worker.
+GPU memory cap and compute share of a predictor worker.
 
 Each worker can be given a cap on the device memory it may allocate, in bytes per
 visible device (WorkerSpec.gpu_memory_limit). It is enforced at two levels:
@@ -17,20 +17,67 @@ visible device (WorkerSpec.gpu_memory_limit). It is enforced at two levels:
 Other frameworks have their own knob, set through WorkerSpec.env, e.g. JAX:
 XLA_PYTHON_CLIENT_MEM_FRACTION (a fraction of the device memory).
 
+A worker can also be given a share of each GPU's streaming multiprocessors
+(WorkerSpec.gpu_compute). Only CUDA MPS can enforce it, through
+CUDA_MPS_ACTIVE_THREAD_PERCENTAGE; without MPS there is no compute limit.
+
+mps_running() tells whether an MPS control daemon is reachable from this process.
+
 cogito never depends on torch: without it apply_memory_limit() does nothing.
 """
 
 import logging
 import os
+import stat
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 # Cap in bytes per visible device, read by apply_memory_limit() in the worker.
 GPU_MEMORY_LIMIT_ENV = "COGITO_GPU_MEMORY_LIMIT"
 MPS_PINNED_DEVICE_MEM_LIMIT_ENV = "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"
+MPS_ACTIVE_THREAD_PERCENTAGE_ENV = "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"
+MPS_PIPE_DIRECTORY_ENV = "CUDA_MPS_PIPE_DIRECTORY"
+DEFAULT_MPS_PIPE_DIRECTORY = "/tmp/nvidia-mps"
 
 MB = 1024 * 1024
 
 _logger = logging.getLogger(__name__)
+
+
+def mps_running(pipe_directory: Optional[str] = None) -> bool:
+    """
+    Whether a CUDA MPS control daemon serves clients using pipe_directory.
+
+    pipe_directory defaults to CUDA_MPS_PIPE_DIRECTORY, or /tmp/nvidia-mps when it
+    is unset, the same directory a CUDA client looks in. The control daemon
+    listens on the "control" pipe there; a regular file by that name does not
+    count. The pipe is never opened, so the daemon sees nothing. A pipe left
+    behind by a daemon that was killed still counts as running.
+    It never raises: anything that cannot be checked means no MPS.
+    """
+    if pipe_directory is None:
+        pipe_directory = (
+            os.environ.get(MPS_PIPE_DIRECTORY_ENV) or DEFAULT_MPS_PIPE_DIRECTORY
+        )
+    try:
+        mode = os.stat(os.path.join(pipe_directory, "control")).st_mode
+    except (OSError, ValueError):
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISSOCK(mode)
+
+
+def format_active_thread_percentage(compute: float) -> str:
+    """
+    Value of CUDA_MPS_ACTIVE_THREAD_PERCENTAGE for a compute share in (0, 1].
+
+    The share is rounded half up to a whole percentage, and never below 1, e.g.
+    "50" for 0.5 and "13" for 0.125. It is rounded from its decimal form, so
+    0.145 gives "15" even though the float is slightly below it.
+    """
+    percentage = (Decimal(str(compute)) * 100).quantize(
+        Decimal(1), rounding=ROUND_HALF_UP
+    )
+    return str(max(1, int(percentage)))
 
 
 def format_pinned_device_mem_limit(devices: str, limit_bytes: int) -> str:
