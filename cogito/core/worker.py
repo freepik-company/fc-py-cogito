@@ -132,7 +132,7 @@ def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
     if spec.gpu_memory_limit is not None:
         env[GPU_MEMORY_LIMIT_ENV] = str(spec.gpu_memory_limit)
     env.update(spec.env)
-    # The devices are named as in the CUDA_VISIBLE_DEVICES the worker ends up with,
+    # One entry per device in the CUDA_VISIBLE_DEVICES the worker ends up with,
     # even one set through spec.env: without them there is no device to cap.
     devices = env.get("CUDA_VISIBLE_DEVICES")
     if (

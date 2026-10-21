@@ -37,16 +37,16 @@ def format_pinned_device_mem_limit(devices: str, limit_bytes: int) -> str:
     """
     Value of CUDA_MPS_PINNED_DEVICE_MEM_LIMIT capping each of devices at limit_bytes.
 
-    devices is a CUDA_VISIBLE_DEVICES value: the variable takes the same device
-    ordinals or UUIDs, each with its limit after an equals, e.g. "0=1024MB".
+    devices is the worker's CUDA_VISIBLE_DEVICES. The client reads the ordinals of
+    CUDA_MPS_PINNED_DEVICE_MEM_LIMIT within the devices it sees, and an entry for
+    a device it cannot see drops every limit, so each visible device is named by
+    its ordinal inside the worker, e.g. "0=1024MB,1=1024MB" for "3,5". Ordinals
+    also hold for a UUID, which CUDA_VISIBLE_DEVICES accepts as a prefix.
     The limit is rounded down to whole megabytes.
     """
     limit = f"{limit_bytes // MB}MB"
-    return ",".join(
-        f"{device}={limit}"
-        for device in (device.strip() for device in devices.split(","))
-        if device
-    )
+    count = sum(1 for device in devices.split(",") if device.strip())
+    return ",".join(f"{ordinal}={limit}" for ordinal in range(count))
 
 
 def apply_memory_limit(limit_bytes: Optional[int] = None) -> bool:

@@ -47,19 +47,20 @@ def fake_torch(monkeypatch):
     return install
 
 
-def test_format_pinned_device_mem_limit_caps_every_device():
-    assert format_pinned_device_mem_limit("0,2", 4 * GB) == "0=4096MB,2=4096MB"
+def test_format_pinned_device_mem_limit_names_devices_by_worker_ordinal():
+    # Physical GPUs 3 and 5 are devices 0 and 1 inside the worker.
+    assert format_pinned_device_mem_limit("3,5", 4 * GB) == "0=4096MB,1=4096MB"
 
 
-def test_format_pinned_device_mem_limit_keeps_uuids():
+def test_format_pinned_device_mem_limit_names_uuids_by_worker_ordinal():
     assert (
         format_pinned_device_mem_limit("GPU-8f3a, GPU-12bc", 512 * 1024**2)
-        == "GPU-8f3a=512MB,GPU-12bc=512MB"
+        == "0=512MB,1=512MB"
     )
 
 
 def test_format_pinned_device_mem_limit_rounds_down_to_megabytes():
-    assert format_pinned_device_mem_limit("1", 1024**2 * 3 + 1023) == "1=3MB"
+    assert format_pinned_device_mem_limit("1", 1024**2 * 3 + 1023) == "0=3MB"
 
 
 def test_apply_memory_limit_sets_the_fraction_of_each_device(fake_torch):

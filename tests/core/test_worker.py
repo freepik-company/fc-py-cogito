@@ -234,10 +234,10 @@ def test_build_worker_env_caps_gpu_memory_through_mps():
     env = build_worker_env(spec)
 
     assert env["COGITO_GPU_MEMORY_LIMIT"] == str(4 * 1024**3)
-    assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=4096MB,2=4096MB"
+    assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=4096MB,1=4096MB"
 
 
-def test_build_worker_env_names_mps_devices_by_uuid():
+def test_build_worker_env_names_uuid_devices_by_worker_ordinal():
     spec = WorkerSpec(
         name="sdxl",
         class_path="m:P",
@@ -246,9 +246,7 @@ def test_build_worker_env_names_mps_devices_by_uuid():
         mps=True,
     )
 
-    assert build_worker_env(spec)["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == (
-        "GPU-8f3a=1024MB"
-    )
+    assert build_worker_env(spec)["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=1024MB"
 
 
 def test_build_worker_env_without_mps_only_caps_torch():
@@ -307,13 +305,13 @@ def test_build_worker_env_caps_the_devices_set_through_resource_variables():
         cuda_visible_devices="GPU-aaaa",
         gpu_memory_limit=1024**3,
         mps=True,
-        env={"CUDA_VISIBLE_DEVICES": "GPU-bbbb"},
+        env={"CUDA_VISIBLE_DEVICES": "GPU-bbbb,GPU-cccc"},
     )
 
     env = build_worker_env(spec)
 
-    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-bbbb"
-    assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "GPU-bbbb=1024MB"
+    assert env["CUDA_VISIBLE_DEVICES"] == "GPU-bbbb,GPU-cccc"
+    assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=1024MB,1=1024MB"
 
 
 def test_build_worker_env_sets_no_mps_cap_when_resource_variables_hide_the_gpus():
@@ -360,7 +358,7 @@ def test_gpu_memory_cap_is_applied_before_the_predictor_import(
     # What the predictor module saw at import time, inside the worker.
     assert json.loads(out.read_text()) == {
         "COGITO_GPU_MEMORY_LIMIT": str(4 * 1024**3),
-        "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT": "3=4096MB",
+        "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT": "0=4096MB",
         "torch_capped": True,
     }
     assert json.loads(torch_out.read_text()) == {"fraction": 0.25, "device": 0}
