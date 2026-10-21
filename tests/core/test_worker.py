@@ -78,6 +78,59 @@ PROBE_PREDICTOR = textwrap.dedent(
 )
 
 
+# A stand-in for torch inside the worker: records the cap it is asked to apply.
+FAKE_TORCH = textwrap.dedent(
+    """
+    import json
+    import os
+    import types
+
+
+    def _set_per_process_memory_fraction(fraction, device):
+        with open(os.environ["COGITO_TEST_TORCH_OUT"], "w") as out:
+            json.dump({"fraction": fraction, "device": device}, out)
+
+
+    cuda = types.SimpleNamespace(
+        is_available=lambda: True,
+        device_count=lambda: 1,
+        get_device_properties=lambda device: types.SimpleNamespace(
+            total_memory=16 * 1024**3
+        ),
+        set_per_process_memory_fraction=_set_per_process_memory_fraction,
+    )
+    """
+)
+
+# Records, at import time, the memory cap variables and whether torch was capped.
+MEMORY_PROBE_PREDICTOR = textwrap.dedent(
+    """
+    import json
+    import os
+
+    with open(os.environ["COGITO_TEST_OUT"], "w") as out:
+        json.dump(
+            {
+                "COGITO_GPU_MEMORY_LIMIT": os.environ.get("COGITO_GPU_MEMORY_LIMIT"),
+                "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT": os.environ.get(
+                    "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"
+                ),
+                "torch_capped": os.path.exists(os.environ["COGITO_TEST_TORCH_OUT"]),
+            },
+            out,
+        )
+
+
+    class Predictor:
+        def setup(self):
+            pass
+
+        def predict(self):
+            return None
+    """
+)
+
+
 # A launcher whose main module is re-imported by every spawned worker during its
 # bootstrap, before the worker entry point runs.
 LAUNCHER = textwrap.dedent(
@@ -167,6 +220,121 @@ def test_build_worker_env_adds_resource_variables():
 
     assert env["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] == "50"
     assert env["CUDA_VISIBLE_DEVICES"] == "1"
+
+
+def test_build_worker_env_caps_gpu_memory_through_mps():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="0,2",
+        gpu_memory_limit=4 * 1024**3,
+        mps=True,
+    )
+
+    env = build_worker_env(spec)
+
+    assert env["COGITO_GPU_MEMORY_LIMIT"] == str(4 * 1024**3)
+    assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=4096MB,2=4096MB"
+
+
+def test_build_worker_env_names_mps_devices_by_uuid():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="GPU-8f3a",
+        gpu_memory_limit=1024**3,
+        mps=True,
+    )
+
+    assert build_worker_env(spec)["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == (
+        "GPU-8f3a=1024MB"
+    )
+
+
+def test_build_worker_env_without_mps_only_caps_torch():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="1",
+        gpu_memory_limit=1024**3,
+    )
+
+    env = build_worker_env(spec)
+
+    assert env["COGITO_GPU_MEMORY_LIMIT"] == str(1024**3)
+    assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in env
+
+
+@pytest.mark.parametrize("devices", [None, ""])
+def test_build_worker_env_sets_no_mps_cap_without_devices(devices):
+    spec = WorkerSpec(
+        name="clip",
+        class_path="m:P",
+        cuda_visible_devices=devices,
+        gpu_memory_limit=1024**3,
+        mps=True,
+    )
+
+    assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in build_worker_env(spec)
+
+
+def test_build_worker_env_sets_no_cap_without_a_limit():
+    spec = WorkerSpec(name="sdxl", class_path="m:P", cuda_visible_devices="0", mps=True)
+
+    env = build_worker_env(spec)
+
+    assert "COGITO_GPU_MEMORY_LIMIT" not in env
+    assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in env
+
+
+def test_build_worker_env_lets_resource_variables_override_the_mps_cap():
+    spec = WorkerSpec(
+        name="sdxl",
+        class_path="m:P",
+        cuda_visible_devices="0",
+        gpu_memory_limit=1024**3,
+        mps=True,
+        env={"CUDA_MPS_PINNED_DEVICE_MEM_LIMIT": "0=512MB"},
+    )
+
+    assert build_worker_env(spec)["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=512MB"
+
+
+@pytest.mark.parametrize("limit", [0, -1, 1024**2 - 1])
+def test_worker_spec_rejects_a_gpu_memory_limit_below_one_megabyte(limit):
+    with pytest.raises(ValueError, match="gpu_memory_limit"):
+        WorkerSpec(name="sdxl", class_path="m:P", gpu_memory_limit=limit)
+
+
+def test_gpu_memory_cap_is_applied_before_the_predictor_import(
+    predictors_path, workers
+):
+    (predictors_path / "torch.py").write_text(FAKE_TORCH)
+    (predictors_path / "cogito_memory_probe_predictor.py").write_text(
+        MEMORY_PROBE_PREDICTOR
+    )
+    out = predictors_path / "memory-probe.json"
+    torch_out = predictors_path / "torch.json"
+    spec = WorkerSpec(
+        name="memory-probe",
+        class_path="cogito_memory_probe_predictor:Predictor",
+        cuda_visible_devices="3",
+        gpu_memory_limit=4 * 1024**3,
+        mps=True,
+        env={"COGITO_TEST_OUT": str(out), "COGITO_TEST_TORCH_OUT": str(torch_out)},
+    )
+
+    worker = spawn_worker(spec, start_timeout=60.0)
+    workers.append(worker)
+
+    assert worker.handshake["status"] == "ready"
+    # What the predictor module saw at import time, inside the worker.
+    assert json.loads(out.read_text()) == {
+        "COGITO_GPU_MEMORY_LIMIT": str(4 * 1024**3),
+        "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT": "3=4096MB",
+        "torch_capped": True,
+    }
+    assert json.loads(torch_out.read_text()) == {"fraction": 0.25, "device": 0}
 
 
 def test_worker_env_is_applied_before_the_predictor_import(
