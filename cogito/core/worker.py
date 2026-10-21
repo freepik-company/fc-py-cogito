@@ -138,10 +138,12 @@ def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
         and MPS_PINNED_DEVICE_MEM_LIMIT_ENV not in spec.env
     ):
         # One entry per device in the CUDA_VISIBLE_DEVICES the worker ends up
-        # with: set through spec.env, or else inherited from this process.
-        devices = env.get(
-            "CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES")
-        )
+        # with: set through spec.env, or else inherited from this process. Read
+        # under the lock: another worker being started may have changed it.
+        devices = env.get("CUDA_VISIBLE_DEVICES")
+        if devices is None:
+            with _SPAWN_ENV_LOCK:
+                devices = os.environ.get("CUDA_VISIBLE_DEVICES")
         if devices is None:
             # Every GPU is visible, and how many there are is unknown here.
             _logger.warning(

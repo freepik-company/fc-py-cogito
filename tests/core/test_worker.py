@@ -31,6 +31,7 @@ from cogito.core.worker import (
     SupervisedWorker,
     WorkerSpec,
     WorkerSupervisor,
+    _spawn_environ,
     build_worker_env,
     spawn_worker,
 )
@@ -283,6 +284,35 @@ def test_build_worker_env_caps_the_inherited_visible_devices(monkeypatch):
 
     assert "CUDA_VISIBLE_DEVICES" not in env
     assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=1024MB,1=1024MB"
+
+
+def test_build_worker_env_ignores_the_devices_of_a_worker_being_started(
+    monkeypatch,
+):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    spec = WorkerSpec(name="sdxl", class_path="m:P", gpu_memory_limit=1024**3, mps=True)
+    entered, release = threading.Event(), threading.Event()
+
+    def start_another_worker():
+        # What spawning a worker pinned to "0,1" does to this process meanwhile.
+        with _spawn_environ({"CUDA_VISIBLE_DEVICES": "0,1"}):
+            entered.set()
+            release.wait(5.0)
+
+    starter = threading.Thread(target=start_another_worker)
+    starter.start()
+    assert entered.wait(5.0)
+    built = {}
+    builder = threading.Thread(target=lambda: built.update(build_worker_env(spec)))
+    builder.start()
+    builder.join(0.2)
+    # It waits for the other worker's start instead of reading its devices.
+    assert builder.is_alive()
+    release.set()
+    starter.join(5.0)
+    builder.join(5.0)
+
+    assert built["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=1024MB"
 
 
 def test_build_worker_env_warns_when_the_mps_cap_has_no_device_list(
