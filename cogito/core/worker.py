@@ -40,6 +40,13 @@ from cogito.core.exceptions import (
     WorkerTimeoutError,
     WorkerUnavailableError,
 )
+from cogito.gpu import (
+    GPU_MEMORY_LIMIT_ENV,
+    MB,
+    MPS_PINNED_DEVICE_MEM_LIMIT_ENV,
+    apply_memory_limit,
+    format_pinned_device_mem_limit,
+)
 
 # Workers always use the spawn start method: a forked child would inherit any CUDA
 # context the parent created, and the env must be in place before the predictor
@@ -84,6 +91,10 @@ class WorkerSpec:
 
     cuda_visible_devices is the final value for CUDA_VISIBLE_DEVICES: None inherits
     the parent's value, an empty string hides every GPU (CPU-only placement).
+    gpu_memory_limit caps the device memory the worker may allocate, in bytes per
+    visible device (see cogito.gpu). mps says a CUDA MPS daemon serves the worker:
+    only then is the cap enforced by the driver, for every library; otherwise only
+    PyTorch's allocator is capped.
     env holds extra resource variables, applied after the ones cogito sets.
     concurrency is how many requests the worker runs at the same time.
     """
@@ -93,10 +104,17 @@ class WorkerSpec:
     cuda_visible_devices: Optional[str] = None
     env: Mapping[str, str] = field(default_factory=dict)
     concurrency: int = 1
+    gpu_memory_limit: Optional[int] = None
+    mps: bool = False
 
     def __post_init__(self):
         if self.concurrency < 1:
             raise ValueError(f"concurrency must be at least 1, got {self.concurrency}")
+        if self.gpu_memory_limit is not None and self.gpu_memory_limit < MB:
+            raise ValueError(
+                f"gpu_memory_limit must be at least {MB} bytes (1MB), "
+                f"got {self.gpu_memory_limit}"
+            )
 
 
 def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
@@ -111,7 +129,32 @@ def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
     }
     if spec.cuda_visible_devices is not None:
         env["CUDA_VISIBLE_DEVICES"] = spec.cuda_visible_devices
+    if spec.gpu_memory_limit is not None:
+        env[GPU_MEMORY_LIMIT_ENV] = str(spec.gpu_memory_limit)
     env.update(spec.env)
+    if (
+        spec.gpu_memory_limit is not None
+        and spec.mps
+        and MPS_PINNED_DEVICE_MEM_LIMIT_ENV not in spec.env
+    ):
+        # One entry per device in the CUDA_VISIBLE_DEVICES the worker ends up
+        # with: set through spec.env, or else inherited from this process. Read
+        # under the lock: another worker being started may have changed it.
+        devices = env.get("CUDA_VISIBLE_DEVICES")
+        if devices is None:
+            with _SPAWN_ENV_LOCK:
+                devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if devices is None:
+            # Every GPU is visible, and how many there are is unknown here.
+            _logger.warning(
+                "No MPS memory cap for worker %s: CUDA_VISIBLE_DEVICES is not set, "
+                "so only PyTorch's allocator is capped",
+                spec.name,
+            )
+        elif devices.strip():
+            env[MPS_PINNED_DEVICE_MEM_LIMIT_ENV] = format_pinned_device_mem_limit(
+                devices, spec.gpu_memory_limit
+            )
     return env
 
 
@@ -155,6 +198,8 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     stage = "load"
     event_loop = None
     try:
+        # Before the predictor loads its models, so PyTorch fails at the cap.
+        apply_memory_limit()
         predictor = _load_predictor(spec.class_path)
         stage = "setup"
         # setup() runs before the worker reports ready. An async predictor sets up

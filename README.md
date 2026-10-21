@@ -1124,6 +1124,8 @@ This section documents the core classes and methods available in the Cogito SDK 
   - [Trainer Class](#trainer-class)
 - [Version Module](#version-module)
   - [get_version Function](#get_version-function)
+- [GPU Module](#gpu-module)
+  - [GPU Memory Limit](#gpu-memory-limit)
 
 ### Prediction Module
 
@@ -1273,3 +1275,29 @@ print(f"Using Cogito version: {version}")
 ```
 
 This allows you to programmatically check which version of Cogito is being used in your application, which can be helpful for debugging or ensuring compatibility.
+
+### GPU Module
+
+The GPU module (`cogito.gpu`) caps the GPU memory (VRAM) a predictor worker can allocate.
+
+#### GPU Memory Limit
+
+A worker gets its cap, in bytes per visible device, from `WorkerSpec.gpu_memory_limit`. How strictly it is enforced depends on whether a CUDA MPS control daemon serves the worker (`WorkerSpec.mps`):
+
+| | With CUDA MPS | Without CUDA MPS |
+|---|---|---|
+| Mechanism | `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`, set in the worker's environment (e.g. `0=4096MB`) | `torch.cuda.set_per_process_memory_fraction` only |
+| Applies to | Every library in the worker: PyTorch, cuDNN, TensorRT, JAX, custom kernels | PyTorch's caching allocator only |
+| Kind of limit | Hard: the driver fails an allocation beyond the cap, in that worker only | Soft: other libraries can still allocate past it |
+
+In both cases the worker calls `cogito.gpu.apply_memory_limit()` before loading the predictor. When `torch` is installed, it caps PyTorch's allocator at the same number of bytes, so PyTorch fails early with a clear out-of-memory error. Without `torch` it does nothing: cogito does not depend on it. A predictor running in-process can call it at the top of `setup()`:
+
+```python
+from cogito.gpu import apply_memory_limit
+
+apply_memory_limit(8 * 1024**3)  # 8 GiB on each visible device
+```
+
+`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` can only lower the limit set by the MPS control daemon, never raise it. Its devices are named by their ordinal inside the worker (`0`, `1`, … in `CUDA_VISIBLE_DEVICES` order), not by the physical index: an entry for a device the worker cannot see makes the driver drop every limit, so every device listed in `CUDA_VISIBLE_DEVICES` must exist. When the worker does not set `CUDA_VISIBLE_DEVICES`, the cap follows the one it inherits; with none at all, the number of visible GPUs is unknown, so no MPS cap is set and a warning is logged.
+
+Other frameworks have their own setting, passed through `WorkerSpec.env`. For example, JAX preallocates a fraction of the device memory, set with `XLA_PYTHON_CLIENT_MEM_FRACTION` (e.g. `"0.5"`); cogito does not set it for you.
