@@ -1298,6 +1298,6 @@ from cogito.gpu import apply_memory_limit
 apply_memory_limit(8 * 1024**3)  # 8 GiB on each visible device
 ```
 
-`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` can only lower the limit set by the MPS control daemon, never raise it. Its devices are named by their ordinal inside the worker (`0`, `1`, … in `CUDA_VISIBLE_DEVICES` order), not by the physical index: an entry for a device the worker cannot see makes the driver drop every limit, so every device listed in `CUDA_VISIBLE_DEVICES` must exist.
+`CUDA_MPS_PINNED_DEVICE_MEM_LIMIT` can only lower the limit set by the MPS control daemon, never raise it. Its devices are named by their ordinal inside the worker (`0`, `1`, … in `CUDA_VISIBLE_DEVICES` order), not by the physical index: an entry for a device the worker cannot see makes the driver drop every limit, so every device listed in `CUDA_VISIBLE_DEVICES` must exist. When the worker does not set `CUDA_VISIBLE_DEVICES`, the cap follows the one it inherits; with none at all, the number of visible GPUs is unknown, so no MPS cap is set and a warning is logged.
 
 Other frameworks have their own setting, passed through `WorkerSpec.env`. For example, JAX preallocates a fraction of the device memory, set with `XLA_PYTHON_CLIENT_MEM_FRACTION` (e.g. `"0.5"`); cogito does not set it for you.

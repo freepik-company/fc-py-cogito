@@ -132,18 +132,27 @@ def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
     if spec.gpu_memory_limit is not None:
         env[GPU_MEMORY_LIMIT_ENV] = str(spec.gpu_memory_limit)
     env.update(spec.env)
-    # One entry per device in the CUDA_VISIBLE_DEVICES the worker ends up with,
-    # even one set through spec.env: without them there is no device to cap.
-    devices = env.get("CUDA_VISIBLE_DEVICES")
     if (
         spec.gpu_memory_limit is not None
         and spec.mps
-        and devices
         and MPS_PINNED_DEVICE_MEM_LIMIT_ENV not in spec.env
     ):
-        env[MPS_PINNED_DEVICE_MEM_LIMIT_ENV] = format_pinned_device_mem_limit(
-            devices, spec.gpu_memory_limit
+        # One entry per device in the CUDA_VISIBLE_DEVICES the worker ends up
+        # with: set through spec.env, or else inherited from this process.
+        devices = env.get(
+            "CUDA_VISIBLE_DEVICES", os.environ.get("CUDA_VISIBLE_DEVICES")
         )
+        if devices is None:
+            # Every GPU is visible, and how many there are is unknown here.
+            _logger.warning(
+                "No MPS memory cap for worker %s: CUDA_VISIBLE_DEVICES is not set, "
+                "so only PyTorch's allocator is capped",
+                spec.name,
+            )
+        elif devices.strip():
+            env[MPS_PINNED_DEVICE_MEM_LIMIT_ENV] = format_pinned_device_mem_limit(
+                devices, spec.gpu_memory_limit
+            )
     return env
 
 

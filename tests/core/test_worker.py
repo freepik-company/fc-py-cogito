@@ -263,17 +263,40 @@ def test_build_worker_env_without_mps_only_caps_torch():
     assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in env
 
 
-@pytest.mark.parametrize("devices", [None, ""])
-def test_build_worker_env_sets_no_mps_cap_without_devices(devices):
+def test_build_worker_env_sets_no_mps_cap_when_every_gpu_is_hidden():
     spec = WorkerSpec(
         name="clip",
         class_path="m:P",
-        cuda_visible_devices=devices,
+        cuda_visible_devices="",
         gpu_memory_limit=1024**3,
         mps=True,
     )
 
     assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in build_worker_env(spec)
+
+
+def test_build_worker_env_caps_the_inherited_visible_devices(monkeypatch):
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
+    spec = WorkerSpec(name="sdxl", class_path="m:P", gpu_memory_limit=1024**3, mps=True)
+
+    env = build_worker_env(spec)
+
+    assert "CUDA_VISIBLE_DEVICES" not in env
+    assert env["CUDA_MPS_PINNED_DEVICE_MEM_LIMIT"] == "0=1024MB,1=1024MB"
+
+
+def test_build_worker_env_warns_when_the_mps_cap_has_no_device_list(
+    monkeypatch, caplog
+):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    spec = WorkerSpec(name="sdxl", class_path="m:P", gpu_memory_limit=1024**3, mps=True)
+
+    with caplog.at_level(logging.WARNING, logger="cogito.core.worker"):
+        env = build_worker_env(spec)
+
+    assert "CUDA_MPS_PINNED_DEVICE_MEM_LIMIT" not in env
+    assert env["COGITO_GPU_MEMORY_LIMIT"] == str(1024**3)
+    assert "No MPS memory cap for worker sdxl" in caplog.text
 
 
 def test_build_worker_env_sets_no_cap_without_a_limit():
