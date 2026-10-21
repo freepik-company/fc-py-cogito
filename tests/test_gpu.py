@@ -59,6 +59,12 @@ def test_format_pinned_device_mem_limit_names_uuids_by_worker_ordinal():
     )
 
 
+def test_format_pinned_device_mem_limit_stops_at_the_first_empty_entry():
+    # CUDA sees only device 0 in "0,,1": an entry for a second one would make the
+    # driver drop every limit.
+    assert format_pinned_device_mem_limit("0,,1", 4 * GB) == "0=4096MB"
+
+
 def test_format_pinned_device_mem_limit_rounds_down_to_megabytes():
     assert format_pinned_device_mem_limit("1", 1024**2 * 3 + 1023) == "0=3MB"
 

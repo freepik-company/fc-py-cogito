@@ -42,10 +42,17 @@ def format_pinned_device_mem_limit(devices: str, limit_bytes: int) -> str:
     a device it cannot see drops every limit, so each visible device is named by
     its ordinal inside the worker, e.g. "0=1024MB,1=1024MB" for "3,5". Ordinals
     also hold for a UUID, which CUDA_VISIBLE_DEVICES accepts as a prefix.
+    CUDA stops reading CUDA_VISIBLE_DEVICES at its first invalid entry, so the
+    count stops at the first empty one; every device listed before it must exist,
+    or the worker sees fewer devices than there are entries.
     The limit is rounded down to whole megabytes.
     """
     limit = f"{limit_bytes // MB}MB"
-    count = sum(1 for device in devices.split(",") if device.strip())
+    count = 0
+    for device in devices.split(","):
+        if not device.strip():
+            break
+        count += 1
     return ",".join(f"{ordinal}={limit}" for ordinal in range(count))
 
 
