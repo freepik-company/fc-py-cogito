@@ -225,7 +225,17 @@ def test_mps_running_never_raises(monkeypatch):
 
 @pytest.mark.parametrize(
     "compute, percentage",
-    [(1.0, "100"), (0.5, "50"), (0.29, "29"), (0.125, "13"), (0.001, "1")],
+    [
+        (1.0, "100"),
+        (0.5, "50"),
+        (0.29, "29"),
+        (0.125, "13"),
+        (0.145, "15"),
+        (0.285, "29"),
+        (0.575, "58"),
+        (0.004, "1"),
+        (0.001, "1"),
+    ],
 )
 def test_format_active_thread_percentage(compute, percentage):
     assert format_active_thread_percentage(compute) == percentage

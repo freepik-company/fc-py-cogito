@@ -29,6 +29,7 @@ cogito never depends on torch: without it apply_memory_limit() does nothing.
 import logging
 import os
 import stat
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 # Cap in bytes per visible device, read by apply_memory_limit() in the worker.
@@ -70,9 +71,13 @@ def format_active_thread_percentage(compute: float) -> str:
     Value of CUDA_MPS_ACTIVE_THREAD_PERCENTAGE for a compute share in (0, 1].
 
     The share is rounded half up to a whole percentage, and never below 1, e.g.
-    "50" for 0.5 and "13" for 0.125.
+    "50" for 0.5 and "13" for 0.125. It is rounded from its decimal form, so
+    0.145 gives "15" even though the float is slightly below it.
     """
-    return str(max(1, int(compute * 100 + 0.5)))
+    percentage = (Decimal(str(compute)) * 100).quantize(
+        Decimal(1), rounding=ROUND_HALF_UP
+    )
+    return str(max(1, int(percentage)))
 
 
 def format_pinned_device_mem_limit(devices: str, limit_bytes: int) -> str:
