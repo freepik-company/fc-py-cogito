@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import contextlib
 import json
 import logging
 import multiprocessing
@@ -15,6 +16,8 @@ from types import MappingProxyType
 import pytest
 from pydantic import BaseModel
 
+from cogito.api.handlers import create_health_check_handler
+
 from cogito.core.exceptioin_handlers import (
     worker_timeout_exception_handler,
     worker_unavailable_exception_handler,
@@ -26,6 +29,7 @@ from cogito.core.exceptions import (
     WorkerTimeoutError,
     WorkerUnavailableError,
 )
+from cogito.core.utils import readiness_context
 from cogito.core.worker import (
     RestartPolicy,
     SupervisedWorker,
@@ -1861,7 +1865,7 @@ def test_a_handshake_frozen_halfway_still_times_out(supervision_path):
     with pytest.raises(WorkerStartError) as error:
         spawn_worker(PARTIAL_HANDSHAKE, start_timeout=3.0)
 
-    assert error.value.detail == "predictor not loaded after 3.0s"
+    assert error.value.detail == "predictor not ready after 3.0s"
     assert not multiprocessing.active_children()
 
 
@@ -1891,7 +1895,7 @@ def test_a_frozen_handshake_times_out_even_with_a_forked_helper(
     helper = int(out.read_text()) if out.exists() and out.read_text() else None
     try:
         assert not starter.is_alive()
-        assert [error.detail for error in errors] == ["predictor not loaded after 3.0s"]
+        assert [error.detail for error in errors] == ["predictor not ready after 3.0s"]
         assert helper is not None
         wait_until(lambda: not pid_exists(helper), timeout=10.0)
     finally:
@@ -2218,3 +2222,236 @@ def test_interruption_after_monitor_start_return_cancels_supervision(
     assert worker.restarts == 0
     assert worker._wake_reader.closed
     assert not multiprocessing.active_children()
+
+
+SETUP_PREDICTORS = {
+    # predict() returns what setup() stored: it fails if setup() never ran.
+    "cogito_stateful_predictor": """
+        import os
+
+
+        class Predictor:
+            def setup(self):
+                self.state = f"set up in {os.getpid()}"
+
+            def predict(self) -> str:
+                return self.state
+    """,
+    # setup() creates the file at COGITO_TEST_STARTED, then blocks until the file
+    # at COGITO_TEST_GATE exists.
+    "cogito_gated_predictor": """
+        import os
+        import time
+
+
+        class Predictor:
+            def setup(self):
+                open(os.environ["COGITO_TEST_STARTED"], "w").close()
+                while not os.path.exists(os.environ["COGITO_TEST_GATE"]):
+                    time.sleep(0.02)
+
+            def predict(self) -> str:
+                return "ok"
+    """,
+    "cogito_failing_setup_predictor": """
+        class Predictor:
+            def setup(self):
+                raise RuntimeError("model weights missing")
+
+            def predict(self) -> str:
+                return "unreachable"
+    """,
+    # setup() fails while the file at COGITO_TEST_MARKER exists.
+    "cogito_flaky_setup_predictor": """
+        import os
+
+
+        class Predictor:
+            def setup(self):
+                if os.path.exists(os.environ["COGITO_TEST_MARKER"]):
+                    raise RuntimeError("weights not downloaded yet")
+
+            def predict(self) -> int:
+                return os.getpid()
+    """,
+    # predict() runs on the loop setup() ran on, and uses what setup() bound to it.
+    "cogito_async_setup_predictor": """
+        import asyncio
+
+
+        class Predictor:
+            async def setup(self):
+                self.loop = asyncio.get_running_loop()
+                self.queue = asyncio.Queue()
+                await self.queue.put("from setup")
+
+            async def predict(self) -> dict:
+                return {
+                    "same_loop": asyncio.get_running_loop() is self.loop,
+                    "value": await self.queue.get(),
+                }
+    """,
+    "cogito_async_setup_sync_predict_predictor": """
+        import asyncio
+
+
+        class Predictor:
+            async def setup(self):
+                await asyncio.sleep(0)
+                self.value = "set up asynchronously"
+
+            def predict(self) -> str:
+                return self.value
+    """,
+}
+
+
+@pytest.fixture
+def setup_path(supervision_path):
+    for module, source in SETUP_PREDICTORS.items():
+        (supervision_path / f"{module}.py").write_text(textwrap.dedent(source))
+    return supervision_path
+
+
+@contextlib.contextmanager
+def gateway(supervisor, readiness_file):
+    """
+    What a gateway does around its workers: it serves /health-check while they
+    start, and writes the readiness file once WorkerSupervisor.start() returns.
+
+    Yields the /health-check status code getter and the start errors.
+    """
+    handler = create_health_check_handler(readiness_file)
+    resources = contextlib.ExitStack()
+    start_errors = []
+
+    def start_workers():
+        try:
+            supervisor.start()
+        except WorkerStartError as e:
+            start_errors.append(e)
+            return
+        resources.enter_context(readiness_context(readiness_file))
+
+    def health_check():
+        return asyncio.run(handler(None)).status_code
+
+    starter = threading.Thread(target=start_workers)
+    starter.start()
+    try:
+        yield health_check, start_errors
+    finally:
+        starter.join()
+        resources.close()
+        supervisor.stop()
+
+
+def test_setup_runs_in_the_worker_before_it_reports_ready(setup_path, workers):
+    worker = start(workers, "stateful", "cogito_stateful_predictor")
+
+    assert asyncio.run(worker.predict({})) == f"set up in {worker.pid}"
+
+
+def test_async_setup_shares_the_event_loop_of_predict(setup_path, workers):
+    worker = start(workers, "async", "cogito_async_setup_predictor")
+
+    assert asyncio.run(worker.predict({})) == {
+        "same_loop": True,
+        "value": "from setup",
+    }
+
+
+def test_async_setup_with_a_sync_predict(setup_path, workers):
+    worker = start(workers, "mixed", "cogito_async_setup_sync_predict_predictor")
+
+    assert asyncio.run(worker.predict({})) == "set up asynchronously"
+
+
+def test_health_check_is_503_until_every_worker_is_set_up(
+    setup_path, tmp_path, monkeypatch
+):
+    gate = tmp_path / "gate"
+    setup_started = tmp_path / "setup-started"
+    readiness_file = str(tmp_path / "readiness.lock")
+    monkeypatch.setenv("COGITO_TEST_GATE", str(gate))
+    monkeypatch.setenv("COGITO_TEST_STARTED", str(setup_started))
+    supervisor = WorkerSupervisor(
+        [
+            WorkerSpec(name="fast", class_path="cogito_stateful_predictor:Predictor"),
+            WorkerSpec(name="slow", class_path="cogito_gated_predictor:Predictor"),
+        ],
+        start_timeout=60.0,
+    )
+    with gateway(supervisor, readiness_file) as (health_check, start_errors):
+        # The fast worker is set up, the slow one is still in its setup().
+        wait_until(setup_started.exists)
+        assert supervisor["fast"].is_available()
+        assert not supervisor["slow"].is_available()
+        assert health_check() == 503
+        assert not os.path.exists(readiness_file)
+
+        gate.touch()
+        wait_until(lambda: health_check() == 200)
+        assert supervisor["fast"].is_available()
+        assert supervisor["slow"].is_available()
+
+    assert start_errors == []
+    assert not os.path.exists(readiness_file)
+    assert not multiprocessing.active_children()
+
+
+def test_setup_failure_is_logged_with_the_predictor_name(setup_path, tmp_path, caplog):
+    caplog.set_level(logging.ERROR, logger="cogito.core.worker")
+    readiness_file = str(tmp_path / "readiness.lock")
+    supervisor = WorkerSupervisor(
+        [
+            WorkerSpec(name="good", class_path="cogito_stateful_predictor:Predictor"),
+            WorkerSpec(
+                name="broken", class_path="cogito_failing_setup_predictor:Predictor"
+            ),
+        ],
+        start_timeout=60.0,
+    )
+    with gateway(supervisor, readiness_file) as (health_check, start_errors):
+        wait_until(lambda: start_errors)
+        assert health_check() == 503
+        assert not os.path.exists(readiness_file)
+
+    [error] = start_errors
+    assert error.predictor == "broken"
+    assert error.detail.startswith("setup() failed: ")
+    assert "RuntimeError: model weights missing" in error.detail
+    [record] = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "Unable to set up predictor"
+    ]
+    assert record.predictor == "broken"
+    assert "model weights missing" in record.error
+    # The worker that was set up is stopped with the rest.
+    assert not multiprocessing.active_children()
+
+
+def test_a_setup_failure_on_restart_is_logged_and_retried(
+    setup_path, supervised, caplog, monkeypatch
+):
+    marker = setup_path / "not-downloaded"
+    monkeypatch.setenv("COGITO_TEST_MARKER", str(marker))
+    caplog.set_level(logging.WARNING, logger="cogito.core.worker")
+    worker = supervise(supervised, "flaky", "cogito_flaky_setup_predictor")
+    first_pid = worker.pid
+
+    marker.touch()
+    os.kill(first_pid, signal.SIGKILL)
+    wait_until(
+        lambda: any(
+            record.getMessage() == "Unable to set up predictor"
+            and record.predictor == "flaky"
+            for record in caplog.records
+        )
+    )
+    marker.unlink()
+
+    wait_until(lambda: worker.is_available())
+    assert worker.pid != first_pid
+    assert asyncio.run(worker.predict({})) == worker.pid
