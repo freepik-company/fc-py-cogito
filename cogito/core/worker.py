@@ -152,20 +152,35 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     # again keeps it in place before the predictor import however it was started.
     os.environ.update(env)
 
+    stage = "load"
+    event_loop = None
     try:
         predictor = _load_predictor(spec.class_path)
+        stage = "setup"
+        # setup() runs before the worker reports ready. An async predictor sets up
+        # on the event loop its requests will run on, even with a sync setup(), as
+        # in-process: whatever setup() binds to the loop (sessions, clients) still
+        # works in predict().
+        if inspect.iscoroutinefunction(predictor.setup) or (
+            inspect.iscoroutinefunction(predictor.predict)
+        ):
+            event_loop = _EventLoopThread(f"cogito-worker-{spec.name}-loop")
+            event_loop.run(_setup_on_loop(predictor))
+        else:
+            predictor.setup()
     except BaseException:
         try:
             conn.send(
                 {
                     "status": "error",
+                    "stage": stage,
                     "pid": os.getpid(),
                     "error": traceback.format_exc(),
                 }
             )
         except OSError:
             # The gateway is gone already: nobody would stop what the failed load
-            # may have started.
+            # or setup may have started.
             _exit_with_process_group()
         conn.close()
         sys.exit(1)
@@ -184,12 +199,19 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
         _exit_with_process_group()
 
     try:
-        _serve(spec, predictor, conn)
+        _serve(spec, predictor, conn, event_loop)
     except BaseException:
         _logger.critical("Worker loop failed", exc_info=True)
         _exit_with_process_group()
     conn.close()
     _stop_own_process_group()
+
+
+async def _setup_on_loop(predictor: Any) -> None:
+    if inspect.iscoroutinefunction(predictor.setup):
+        await predictor.setup()
+    else:
+        predictor.setup()
 
 
 def _stop_own_process_group() -> None:
@@ -348,9 +370,16 @@ def _handle_request(
     reply(payload)
 
 
-def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
+def _serve(
+    spec: WorkerSpec,
+    predictor: Any,
+    conn: Connection,
+    event_loop: Optional[_EventLoopThread] = None,
+) -> None:
     """
-    Run prediction requests until the parent asks the worker to stop or goes away
+    Run prediction requests until the parent asks the worker to stop or goes away.
+
+    An async predict() runs on event_loop, the loop its setup() ran on.
     """
     send_lock = threading.Lock()
 
@@ -362,9 +391,9 @@ def _serve(spec: WorkerSpec, predictor: Any, conn: Connection) -> None:
             except (BrokenPipeError, OSError):
                 pass
 
-    event_loop = None
     if inspect.iscoroutinefunction(predictor.predict):
-        event_loop = _EventLoopThread(f"cogito-worker-{spec.name}-loop")
+        if event_loop is None:
+            event_loop = _EventLoopThread(f"cogito-worker-{spec.name}-loop")
 
         def call(**inputs: Any) -> Any:
             return event_loop.run(predictor.predict(**inputs))
@@ -743,11 +772,12 @@ def _spawn_environ(env: Dict[str, str]) -> Iterator[None]:
 
 def spawn_worker(spec: WorkerSpec, start_timeout: float = 120.0) -> PredictorWorker:
     """
-    Start a worker process for a predictor and wait until the predictor is loaded.
+    Start a worker process for a predictor and wait until the predictor is loaded
+    and set up.
 
     The worker starts with its env already applied, and the predictor is imported
-    only inside the worker.
-    Raises WorkerStartError if the predictor cannot be loaded in time.
+    and its setup() run only inside the worker.
+    Raises WorkerStartError if the predictor cannot be loaded or set up in time.
     """
     return _spawn(spec, start_timeout)
 
@@ -789,7 +819,7 @@ def _spawn(
             raise _SpawnAborted()
         if not ready:
             raise WorkerStartError(
-                spec.name, f"predictor not loaded after {start_timeout}s"
+                spec.name, f"predictor not ready after {start_timeout}s"
             )
         handshake = _recv_handshake(
             spec, parent_conn, process, abort, deadline, start_timeout
@@ -812,7 +842,15 @@ def _spawn(
     if handshake.get("status") != "ready":
         _reap(process, timeout=10.0)
         parent_conn.close()
-        raise WorkerStartError(spec.name, handshake.get("error", "unknown error"))
+        error = handshake.get("error", "unknown error")
+        if handshake.get("stage") == "setup":
+            # Logged here, in the gateway: the worker's own logging is not set up.
+            _logger.error(
+                "Unable to set up predictor",
+                extra={"predictor": spec.name, "error": error},
+            )
+            raise WorkerStartError(spec.name, f"setup() failed: {error}")
+        raise WorkerStartError(spec.name, error)
 
     try:
         return PredictorWorker(spec, env, process, parent_conn, handshake)
@@ -873,9 +911,7 @@ def _recv_handshake(
     if outcome == ["aborted"]:
         raise _SpawnAborted()
     if outcome:
-        raise WorkerStartError(
-            spec.name, f"predictor not loaded after {start_timeout}s"
-        )
+        raise WorkerStartError(spec.name, f"predictor not ready after {start_timeout}s")
     if handshake is None:
         raise EOFError
     return handshake
@@ -1290,6 +1326,9 @@ class WorkerSupervisor:
         """
         Start every worker. If one cannot start, the ones already started are
         stopped and its WorkerStartError is raised.
+
+        Returns only once every predictor has been loaded and set up: this is the
+        moment the gateway is ready, and the one to write the readiness file at.
         """
         _register_exit_hook()
         with _RUNNING_LOCK:
