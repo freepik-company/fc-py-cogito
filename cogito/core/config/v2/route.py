@@ -12,3 +12,14 @@ class RouteConfig(v1):
 
     name: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+
+    @classmethod
+    def default(cls):
+        config = super().default()
+
+        return cls(
+            name=config.name,
+            description=config.description,
+            path=config.path,
+            tags=config.tags,
+        )

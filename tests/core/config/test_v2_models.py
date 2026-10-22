@@ -82,6 +82,16 @@ def test_predictor_class_accepts_alias_and_field_name():
     assert by_alias.model_dump(by_alias=True)["class"] == "m:P"
 
 
+def test_default_route_is_a_v2_route():
+    route = RouteConfig.default()
+
+    assert type(route) is RouteConfig
+    assert route.path == "/v1/predict"
+    predictor = PredictorConfig(name="a", class_path="m:P", route=route)
+    assert predictor.get_route_path == "/v1/predict"
+    assert ServerConfig(**{**ServerConfig.default().model_dump(), "route": route})
+
+
 def test_route_only_needs_a_path():
     route = RouteConfig(path="/v1/sdxl")
 
