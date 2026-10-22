@@ -354,3 +354,38 @@ def test_scaffold_command_v2_file(v2_config, tmp_path, monkeypatch):
     assert (tmp_path / "predict_sdxl.py").exists()
     assert (tmp_path / "predict_clip.py").exists()
     assert (tmp_path / "train.py").exists()
+
+
+def test_scaffold_v2_dotted_module(tmp_path, monkeypatch):
+    import importlib
+    import sys
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = _v2_config([{"name": "sdxl", "class": "models.sdxl:SDXL_Predictor"}])
+
+    scaffold_predict_classes(config)
+
+    assert (tmp_path / "models" / "sdxl.py").exists()
+    assert not (tmp_path / "models.sdxl.py").exists()
+    module = importlib.import_module("models.sdxl")
+    try:
+        assert hasattr(module, "SDXL_Predictor")
+    finally:
+        sys.modules.pop("models.sdxl", None)
+        sys.modules.pop("models", None)
+
+
+def test_scaffold_skips_an_invalid_module(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    config = _v2_config(
+        [
+            {"name": "bad", "class": "../escape:Predictor"},
+            {"name": "good", "class": "predict:Predictor"},
+        ]
+    )
+
+    scaffold_predict_classes(config)
+
+    assert "Invalid module '../escape'" in capsys.readouterr().out
+    assert [path.name for path in tmp_path.iterdir()] == ["predict.py"]

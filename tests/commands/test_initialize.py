@@ -8,7 +8,11 @@ from pathlib import Path
 from click.testing import CliRunner
 from unittest.mock import patch
 
-from cogito.commands.initialize import _validate_class_path, init
+from cogito.commands.initialize import (
+    _validate_class_path,
+    _validate_route_path,
+    init,
+)
 from cogito.core.config.file import ConfigFile
 
 
@@ -428,3 +432,25 @@ def test_init_rejects_unknown_config_version(runner, temp_dir):
     result = runner.invoke(init, ["--default", "--config-version", "3"])
     assert result.exit_code != 0
     assert not os.path.exists("cogito.yaml")
+
+
+@pytest.mark.parametrize(
+    "path", ["v1/predict", "/v1/pre dict", "/v1/pre\tdict", "/v1/predict?x=1", "/v1#a"]
+)
+def test_validate_route_path_rejects_invalid(path):
+    with pytest.raises(click.BadParameter):
+        _validate_route_path(path)
+
+
+@pytest.mark.parametrize(
+    "path, expected",
+    [
+        ("/v1/predict", "/v1/predict"),
+        ("/v1/predict/", "/v1/predict"),
+        ("/v1//predict", "/v1/predict"),
+        ("/v1/{item_id}", "/v1/{item_id}"),
+        ("/", "/"),
+    ],
+)
+def test_validate_route_path_normalizes(path, expected):
+    assert _validate_route_path(path) == expected

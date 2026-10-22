@@ -49,10 +49,16 @@ def _validate_predictor_name(value: str) -> str:
     return value
 
 
+ROUTE_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9._~/{}-]*$")
+
+
 def _validate_route_path(value: str) -> str:
-    if not value.startswith("/") or " " in value:
-        raise click.BadParameter("The route path must start with '/', e.g. /v1/predict")
-    return value.rstrip("/") or "/"
+    if not ROUTE_PATH_PATTERN.match(value):
+        raise click.BadParameter(
+            "The route path must start with '/' and use letters, digits and "
+            "'._~/{}-', e.g. /v1/predict"
+        )
+    return re.sub(r"/{2,}", "/", value).rstrip("/") or "/"
 
 
 def _prompt_unique(text: str, default: str, used: set, value_proc) -> str:

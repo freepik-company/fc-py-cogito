@@ -1,3 +1,4 @@
+import keyword
 import os
 
 import click
@@ -29,6 +30,14 @@ def _predictor_classes(config: ConfigFile) -> list:
     return classes
 
 
+def _module_file(module: str):
+    """Return the file of a dotted module (a.b -> a/b.py), or None if invalid."""
+    parts = module.split(".")
+    if not all(part.isidentifier() and not keyword.iskeyword(part) for part in parts):
+        return None
+    return os.path.join(*parts) + ".py"
+
+
 def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
     template_dir = os.path.join(os.path.dirname(__file__), "..", "templates")
     env = Environment(loader=FileSystemLoader(template_dir))
@@ -39,8 +48,12 @@ def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
     # Group routes by file
     files = {}
     for predictor, class_data in _predictor_classes(config):
-        file_name = f'{predictor.split(":")[0]}.py'
-        class_name = predictor.split(":")[1]
+        module, class_name = predictor.split(":")[:2]
+        file_name = _module_file(module)
+
+        if file_name is None:
+            click.echo(f"Invalid module '{module}' in {predictor}, skipping it.")
+            continue
 
         if file_name not in files:
             files[file_name] = []
@@ -62,6 +75,8 @@ def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
             continue
 
         rendered_content = template.render(file=files, routes=routes)
+        if os.path.dirname(file):
+            os.makedirs(os.path.dirname(file), exist_ok=True)
         with open(file, "w") as f:
             f.write(rendered_content)
 
