@@ -10,6 +10,8 @@ from cogito.core.config.v0 import (
     CogitoConfig,
     FastAPIConfig,
 )
+from cogito.core.config.v2 import PredictorConfig
+from cogito.core.config.v2 import RouteConfig as V2RouteConfig
 
 
 @pytest.fixture
@@ -251,3 +253,104 @@ def test_scaffold_train_classes_no_force_existing_file(mock_config, tmp_path, ca
     finally:
         # Restaurar el directorio original
         os.chdir(original_dir)
+
+
+def _v2_config(predictors):
+    from cogito.core.config.v2 import CogitoConfig as V2CogitoConfig
+
+    cogito = V2CogitoConfig.default()
+    cogito.predictors = [PredictorConfig(**predictor) for predictor in predictors]
+    return ConfigFile(cogito=cogito, config_version=2)
+
+
+@pytest.fixture
+def v2_config():
+    return _v2_config(
+        [
+            {
+                "name": "sdxl",
+                "class": "predict_sdxl:Predictor",
+                "route": V2RouteConfig(
+                    name="SDXL",
+                    description="Generate an image",
+                    path="/v1/sdxl",
+                    tags=["sdxl"],
+                ),
+            },
+            # A predictor with no route of its own
+            {"name": "clip", "class": "predict_clip:Predictor"},
+        ]
+    )
+
+
+def test_scaffold_v2_one_file_per_module(v2_config, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    scaffold_predict_classes(v2_config)
+
+    sdxl = (tmp_path / "predict_sdxl.py").read_text()
+    compile(sdxl, "predict_sdxl.py", "exec")
+    assert "class Predictor(BasePredictor):" in sdxl
+    assert "Name: SDXL" in sdxl
+    assert "Generate an image" in sdxl
+    assert "Route path: /v1/sdxl" in sdxl
+    assert "Tags: ['sdxl']" in sdxl
+
+    clip = (tmp_path / "predict_clip.py").read_text()
+    compile(clip, "predict_clip.py", "exec")
+    assert "class Predictor(BasePredictor):" in clip
+    assert "Name: clip" in clip
+    assert "Route path" not in clip
+    assert "None" not in clip
+
+
+def test_scaffold_v2_same_module_several_classes(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    config = _v2_config(
+        [
+            {"name": "sdxl", "class": "predict:SDXL"},
+            {"name": "clip", "class": "predict:Clip"},
+            # Same class served under another name: declared once
+            {"name": "clip-fast", "class": "predict:Clip"},
+        ]
+    )
+
+    scaffold_predict_classes(config)
+
+    assert [path.name for path in tmp_path.iterdir()] == ["predict.py"]
+    content = (tmp_path / "predict.py").read_text()
+    compile(content, "predict.py", "exec")
+    assert content.count("class SDXL(BasePredictor):") == 1
+    assert content.count("class Clip(BasePredictor):") == 1
+
+
+def test_scaffold_v1_config(tmp_path, monkeypatch):
+    from cogito.core.config.v1 import CogitoConfig as V1CogitoConfig
+
+    monkeypatch.chdir(tmp_path)
+    config = ConfigFile(cogito=V1CogitoConfig.default(), config_version=1)
+
+    scaffold_predict_classes(config)
+
+    content = (tmp_path / "predict.py").read_text()
+    compile(content, "predict.py", "exec")
+    assert "class Predictor(BasePredictor):" in content
+    assert "Route path: /v1/predict" in content
+
+
+def test_scaffold_command_v2_file(v2_config, tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    from cogito.commands.scaffold import scaffold
+
+    monkeypatch.chdir(tmp_path)
+    v2_config.save_to_file("cogito.yaml")
+
+    result = CliRunner().invoke(
+        scaffold, ["--train"], obj={"config_path": "cogito.yaml"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "predict_sdxl.py").exists()
+    assert (tmp_path / "predict_clip.py").exists()
+    assert (tmp_path / "train.py").exists()

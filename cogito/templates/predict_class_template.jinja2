@@ -4,10 +4,16 @@ from cogito import BasePredictor
 class {{ route.class_name }}(BasePredictor):
     """
     Name: {{ route.class_data.name }}
+{%- if route.class_data.description %}
     Description:
         {{ route.class_data.description | indent(8) }}
+{%- endif %}
+{%- if route.class_data.path %}
     Route path: {{ route.class_data.path }}
+{%- endif %}
+{%- if route.class_data.tags %}
     Tags: {{ route.class_data.tags }}
+{%- endif %}
     """
 
     def setup(self):
