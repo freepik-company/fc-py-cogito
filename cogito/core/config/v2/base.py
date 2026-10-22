@@ -33,9 +33,10 @@ class CogitoConfig(v1):
                 )
             names.add(predictor.name)
 
-            path = predictor.get_route_path
-            if path is None:
+            if predictor.get_route_path is None:
                 continue
+            # '/v1/sdxl' and '/v1/sdxl/' reach the same handler.
+            path = predictor.get_route_path.rstrip("/") or "/"
             if path in paths:
                 raise ValueError(
                     f"route paths must be unique, '{path}' is declared by "

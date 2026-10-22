@@ -11,13 +11,17 @@ class ResourcesConfig(BaseModel):
     (0 means no GPU constraint). gpu_memory is the fraction of the device memory
     (0.5 is half of it) and gpu_compute the share of the device compute, in percent
     (50 is half of it).
+
+    gpu_memory and gpu_compute cap the predictor on every GPU it sees, so they
+    also apply with gpus 0: the predictor is then not placed, but still capped
+    on the GPUs it inherits.
     """
 
     gpus: float = 0
     gpu_memory: Optional[float] = None
     gpu_compute: Optional[int] = None
 
-    @field_validator("gpus", "gpu_compute", mode="before")
+    @field_validator("gpus", "gpu_memory", "gpu_compute", mode="before")
     @classmethod
     def _reject_booleans(cls, value, info):
         # pydantic reads true/false as 1/0, which is never what a YAML meant here.
@@ -34,6 +38,13 @@ class ResourcesConfig(BaseModel):
             f"gpus must be a fraction in (0, 1] or a positive integer "
             f"(0 for no GPU), got {value}"
         )
+
+    @field_validator("gpu_memory")
+    @classmethod
+    def _validate_gpu_memory(cls, value: Optional[float]) -> Optional[float]:
+        if value is not None and not 0 < value <= 1:
+            raise ValueError(f"gpu_memory must be a fraction in (0, 1], got {value}")
+        return value
 
     @field_validator("gpu_compute")
     @classmethod

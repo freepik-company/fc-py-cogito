@@ -35,13 +35,32 @@ def test_gpus_must_be_a_fraction_or_a_positive_integer(gpus):
         ResourcesConfig(gpus=gpus)
 
 
-@pytest.mark.parametrize("field", ["gpus", "gpu_compute"])
+@pytest.mark.parametrize("field", ["gpus", "gpu_memory", "gpu_compute"])
 @pytest.mark.parametrize("value", [True, False])
 def test_resources_reject_booleans(field, value):
     with pytest.raises(
         ValidationError, match=re.escape(f"{field} must be a number, got {value}")
     ):
         ResourcesConfig(**{field: value})
+
+
+@pytest.mark.parametrize("gpu_memory", [None, 0.01, 0.5, 1])
+def test_valid_gpu_memory(gpu_memory):
+    assert ResourcesConfig(gpu_memory=gpu_memory).gpu_memory == gpu_memory
+
+
+@pytest.mark.parametrize("gpu_memory", [0, -0.5, 1.5, 5, float("inf")])
+def test_gpu_memory_must_be_a_fraction(gpu_memory):
+    message = f"gpu_memory must be a fraction in (0, 1], got {float(gpu_memory)}"
+
+    with pytest.raises(ValidationError, match=re.escape(message)):
+        ResourcesConfig(gpu_memory=gpu_memory)
+
+
+def test_gpu_caps_apply_without_a_gpu_request():
+    resources = ResourcesConfig(gpus=0, gpu_memory=0.5, gpu_compute=50)
+
+    assert (resources.gpu_memory, resources.gpu_compute) == (0.5, 50)
 
 
 @pytest.mark.parametrize("gpu_compute", [None, 1, 50, 100])
@@ -84,6 +103,22 @@ def test_route_paths_must_be_unique():
 
     with pytest.raises(ValidationError, match=re.escape(message)):
         make_config(predictor("sdxl", "/v1/predict"), predictor("clip", "/v1/predict"))
+
+
+@pytest.mark.parametrize("other", ["/v1/predict/", "/v1/predict//"])
+def test_route_paths_ignore_a_trailing_slash(other):
+    message = (
+        "route paths must be unique, '/v1/predict' is declared by predictors "
+        "'sdxl' and 'clip'"
+    )
+
+    with pytest.raises(ValidationError, match=re.escape(message)):
+        make_config(predictor("sdxl", "/v1/predict"), predictor("clip", other))
+
+
+def test_root_route_path_is_kept():
+    with pytest.raises(ValidationError, match="'/' is declared by"):
+        make_config(predictor("sdxl", "/"), predictor("clip", "/"))
 
 
 def test_unique_names_and_paths_are_valid():
