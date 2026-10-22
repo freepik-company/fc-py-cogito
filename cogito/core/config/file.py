@@ -18,6 +18,7 @@ NO_CONFIG_VERSION = 0
 CONFIG_VERSION_MAP: Dict[int, str] = {
     0: "cogito.core.config.v0.base.CogitoConfig",
     1: "cogito.core.config.v1.base.CogitoConfig",
+    2: "cogito.core.config.v2.base.CogitoConfig",
 }
 
 
@@ -87,7 +88,7 @@ class ConfigFile(BaseModel):
         # Prepare the output dictionary
         output_dict = {"config_version": self.config_version}
         if self.cogito:
-            cogito_dict = self.cogito.model_dump(exclude_none=True)
+            cogito_dict = self.cogito.model_dump(exclude_none=True, by_alias=True)
             output_dict["cogito"] = cogito_dict
 
         # Save the output dictionary to the file
@@ -109,6 +110,12 @@ class ConfigFile(BaseModel):
 
         if self.cogito is None:
             raise ValueError("Configuration is not loaded")
+
+        if self.config_version > DEFAULT_CONFIG_VERSION:
+            raise ValueError(
+                f"Cannot upgrade config version {self.config_version} "
+                f"to version {DEFAULT_CONFIG_VERSION}"
+            )
 
         # Load default config for the latest version
         latest_config_class = self._get_config_class(DEFAULT_CONFIG_VERSION)

@@ -1,3 +1,4 @@
+import keyword
 import os
 
 import click
@@ -5,6 +6,36 @@ from jinja2 import Environment, FileSystemLoader
 
 from cogito.core.config.file import ConfigFile
 from cogito.core.exceptions import ConfigFileNotFoundError
+
+
+def _predictor_classes(config: ConfigFile) -> list:
+    """Return (class path, route data) of each predictor of the config."""
+    predictors = getattr(config.cogito, "predictors", None)
+
+    # Config v0/v1: a single predictor served on the server route
+    if not isinstance(predictors, list):
+        return [(config.cogito.predictor, config.cogito.server.route)]
+
+    classes = []
+    for predictor in predictors:
+        route = predictor.route
+        class_data = {
+            "name": (route.name if route else None) or predictor.name,
+            "description": route.description if route else None,
+            "path": route.path if route else None,
+            "tags": route.tags if route else None,
+        }
+        classes.append((predictor.class_path, class_data))
+
+    return classes
+
+
+def _module_file(module: str):
+    """Return the file of a dotted module (a.b -> a/b.py), or None if invalid."""
+    parts = module.split(".")
+    if not all(part.isidentifier() and not keyword.iskeyword(part) for part in parts):
+        return None
+    return os.path.join(*parts) + ".py"
 
 
 def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
@@ -16,17 +47,22 @@ def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
 
     # Group routes by file
     files = {}
-    predictor = config.cogito.predictor
-    route = config.cogito.server.route
+    for predictor, class_data in _predictor_classes(config):
+        module, class_name = predictor.split(":")[:2]
+        file_name = _module_file(module)
 
-    file_name = f'{predictor.split(":")[0]}.py'
-    class_name = predictor.split(":")[1]
-    class_data = route
+        if file_name is None:
+            click.echo(f"Invalid module '{module}' in {predictor}, skipping it.")
+            continue
 
-    if file_name not in files:
-        files[file_name] = []
+        if file_name not in files:
+            files[file_name] = []
 
-    files[file_name].append({"class_name": class_name, "class_data": class_data})
+        # Two predictors may share a class: declare it once
+        if any(route["class_name"] == class_name for route in files[file_name]):
+            continue
+
+        files[file_name].append({"class_name": class_name, "class_data": class_data})
 
     # Create the files
     for file, routes in files.items():
@@ -39,6 +75,8 @@ def scaffold_predict_classes(config: ConfigFile, force: bool = False) -> None:
             continue
 
         rendered_content = template.render(file=files, routes=routes)
+        if os.path.dirname(file):
+            os.makedirs(os.path.dirname(file), exist_ok=True)
         with open(file, "w") as f:
             f.write(rendered_content)
 
@@ -54,7 +92,6 @@ def scaffold_train_classes(config: ConfigFile, force: bool = False) -> bool:
     files = {}
     # Check if trainer is defined in config, default to 'train:Trainer' if not found
     trainer = getattr(config.cogito, "trainer", "train:Trainer")
-    route = config.cogito.server.route
 
     if not trainer:
         click.echo(
@@ -64,12 +101,11 @@ def scaffold_train_classes(config: ConfigFile, force: bool = False) -> bool:
 
     file_name = f'{trainer.split(":")[0]}.py'
     class_name = trainer.split(":")[1]
-    class_data = route
 
     if file_name not in files:
         files[file_name] = []
 
-    files[file_name].append({"class_name": class_name, "class_data": class_data})
+    files[file_name].append({"class_name": class_name})
 
     # Create the files
     for file, routes in files.items():
