@@ -2,12 +2,13 @@ import os
 import pytest
 import tempfile
 
+import click
 import yaml
 from pathlib import Path
 from click.testing import CliRunner
 from unittest.mock import patch
 
-from cogito.commands.initialize import init
+from cogito.commands.initialize import _validate_class_path, init
 from cogito.core.config.file import ConfigFile
 
 
@@ -277,3 +278,66 @@ def test_init_scaffold_several_predictors(runner, temp_dir):
         compile(content, file_name, "exec")
         assert "class Predictor(BasePredictor):" in content
         assert f"Route path: {path}" in content
+
+
+@pytest.mark.parametrize(
+    "class_path",
+    [
+        "predict:Bad-Class",
+        "predict:class",
+        "predict:Predictor:Extra",
+        "my-mod:Predictor",
+        "predict.:Predictor",
+        "predict",
+    ],
+)
+def test_validate_class_path_rejects_invalid(class_path):
+    with pytest.raises(click.BadParameter):
+        _validate_class_path(class_path)
+
+
+@pytest.mark.parametrize(
+    "class_path", ["predict:Predictor", "models.sdxl:SDXL_Predictor"]
+)
+def test_validate_class_path_accepts_valid(class_path):
+    assert _validate_class_path(class_path) == class_path
+
+
+def test_init_prompted_validates_names_and_paths(runner, temp_dir):
+    inputs = (
+        SERVER_INPUTS
+        + [
+            "",  # predictor name (default: predictor)
+            "",  # predictor class (default)
+            "",  # route path (default: /v1/predict)
+            "",  # threads (default)
+            "y",  # add another predictor
+            "clip fast",  # invalid name, asked again
+            "clip-fast",  # predictor name
+            "",  # predictor class (default: predict_clip_fast:Predictor)
+            "v1/clip",  # no leading slash, asked again
+            "/v1/predict/",  # same route as /v1/predict, asked again
+            "/v1/clip/",  # route path, stored without the trailing slash
+            "",  # threads (default)
+            "n",  # add another predictor
+        ]
+        + FILE_INPUTS
+    )
+
+    result = runner.invoke(init, ["--scaffold"], input="\n".join(inputs))
+    assert result.exit_code == 0, result.output
+    assert "'/v1/predict' is already used by another predictor." in result.output
+
+    config = ConfigFile.load_from_file("cogito.yaml")
+    clip = config.cogito.get_predictor_config("clip-fast")
+    assert clip.class_path == "predict_clip_fast:Predictor"
+    assert clip.route.path == "/v1/clip"
+    assert os.path.exists("predict_clip_fast.py")
+
+
+def test_upgrade_refuses_to_downgrade_a_v2_config(runner, temp_dir):
+    runner.invoke(init, ["--default"])
+    config = ConfigFile.load_from_file("cogito.yaml")
+
+    with pytest.raises(ValueError, match="Cannot upgrade config version 2"):
+        config.upgrade()

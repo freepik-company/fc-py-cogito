@@ -111,6 +111,12 @@ class ConfigFile(BaseModel):
         if self.cogito is None:
             raise ValueError("Configuration is not loaded")
 
+        if self.config_version > DEFAULT_CONFIG_VERSION:
+            raise ValueError(
+                f"Cannot upgrade config version {self.config_version} "
+                f"to version {DEFAULT_CONFIG_VERSION}"
+            )
+
         # Load default config for the latest version
         latest_config_class = self._get_config_class(DEFAULT_CONFIG_VERSION)
         latest_config = latest_config_class.default()

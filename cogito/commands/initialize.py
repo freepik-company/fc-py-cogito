@@ -1,3 +1,6 @@
+import keyword
+import re
+
 import click
 
 from cogito.commands.scaffold import scaffold_predict_classes
@@ -15,18 +18,46 @@ def _init_with_default() -> ConfigFile:
     return ConfigFile(cogito=config_class.default(), config_version=version)
 
 
+PREDICTOR_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+
+
+def _is_identifier(value: str) -> bool:
+    return value.isidentifier() and not keyword.iskeyword(value)
+
+
 def _validate_class_path(value: str) -> str:
-    module, _, class_name = value.partition(":")
-    if not module or not class_name:
+    module, separator, class_name = value.partition(":")
+    if (
+        not separator
+        or not all(_is_identifier(part) for part in module.split("."))
+        or not _is_identifier(class_name)
+    ):
         raise click.BadParameter(
-            "Use the 'module:Class' format, e.g. predict:Predictor"
+            "Use the 'module:Class' format with Python identifiers, "
+            "e.g. predict:Predictor"
         )
     return value
 
 
-def _prompt_unique(text: str, default: str, used: set) -> str:
+def _validate_predictor_name(value: str) -> str:
+    if not PREDICTOR_NAME_PATTERN.match(value):
+        raise click.BadParameter(
+            "Use letters, digits, '_' and '-', starting with a letter or digit"
+        )
+    return value
+
+
+def _validate_route_path(value: str) -> str:
+    if not value.startswith("/") or " " in value:
+        raise click.BadParameter("The route path must start with '/', e.g. /v1/predict")
+    return value.rstrip("/") or "/"
+
+
+def _prompt_unique(text: str, default: str, used: set, value_proc) -> str:
     while True:
-        value = click.prompt(text, type=str, default=default, show_default=True)
+        value = click.prompt(
+            text, type=str, default=default, show_default=True, value_proc=value_proc
+        )
         if value not in used:
             return value
         click.echo(f"'{value}' is already used by another predictor.")
@@ -39,16 +70,25 @@ def _prompt_predictors(route_config_class) -> list:
 
     while True:
         first = not predictors
-        name = _prompt_unique("Predictor name", "predictor" if first else None, names)
+        name = _prompt_unique(
+            "Predictor name",
+            "predictor" if first else None,
+            names,
+            _validate_predictor_name,
+        )
+        module = "predict" if first else f"predict_{name.replace('-', '_')}"
         class_path = click.prompt(
             "Predictor class (module:Class)",
             type=str,
-            default="predict:Predictor" if first else f"predict_{name}:Predictor",
+            default=f"{module}:Predictor",
             show_default=True,
             value_proc=_validate_class_path,
         )
         path = _prompt_unique(
-            "Route path", "/v1/predict" if first else f"/v1/{name}", paths
+            "Route path",
+            "/v1/predict" if first else f"/v1/{name}",
+            paths,
+            _validate_route_path,
         )
         threads = click.prompt(
             "Number of threads",
