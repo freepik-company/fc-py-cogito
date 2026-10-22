@@ -147,6 +147,32 @@ def test_upgrade_v1_without_threads():
     assert predictor.get_threads == 1
 
 
+def v0_data() -> dict:
+    return yaml.safe_load(V0_CONFIG)
+
+
+def v1_data() -> dict:
+    return yaml.safe_load(EXAMPLE_CONFIG.read_text())["cogito"]
+
+
+@pytest.mark.parametrize(
+    "version, config_class, load_data",
+    [(0, CogitoConfigV0, v0_data), (1, CogitoConfigV1, v1_data)],
+)
+def test_upgrade_without_optional_server_fields(version, config_class, load_data):
+    data = load_data()
+    for field in ("cache_dir", "version", "readiness_file", "threads"):
+        data["server"].pop(field, None)
+
+    config = upgrade(version, config_class(**data))
+
+    assert config.get_server_cache_dir is None
+    assert config.get_server_version == "0.1.0"
+    assert config.get_server_readiness_file == "$HOME/readiness.lock"
+    assert config.get_server_threads == 1
+    assert config.get_predictors[0].get_threads == 1
+
+
 def test_upgrade_v2_is_a_no_op():
     config = CogitoConfig.default()
 

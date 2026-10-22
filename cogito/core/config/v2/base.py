@@ -100,7 +100,12 @@ class CogitoConfig(v1):
             )
 
         return __class__(
-            server=ServerConfig(**previous_config.server.model_dump(exclude={"route"})),
+            # Unset fields keep their defaults: v0 declares cache_dir: str = None
+            server=ServerConfig(
+                **previous_config.server.model_dump(
+                    exclude={"route"}, exclude_unset=True
+                )
+            ),
             trainer=previous_config.trainer,
             predictors=[
                 PredictorConfig(
