@@ -1,5 +1,7 @@
 from typing import List
 
+from pydantic import Field
+
 from cogito.core.config.v1.base import CogitoConfig as v1
 
 from cogito.core.config.v2.fastapi import FastAPIConfig
@@ -14,7 +16,9 @@ class CogitoConfig(v1):
     """
 
     server: ServerConfig
-    predictors: List[PredictorConfig]
+    predictors: List[PredictorConfig] = Field(min_length=1)
+    # v1's single predictor, replaced by predictors: kept off the v2 file.
+    predictor: str = Field("", exclude=True)
 
     @classmethod
     def default(cls):

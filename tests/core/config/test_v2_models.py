@@ -105,6 +105,8 @@ def test_route_only_needs_a_path():
         {"class": "m:P"},
         {"name": "a"},
         {"name": "a", "class": "m:P", "threads": "many"},
+        {"name": "a", "class": "m:P", "threads": None},
+        {"name": "a", "class": "m:P", "threads": 0},
         {"name": "a", "class": "m:P", "resources": {"gpus": "half"}},
         {"name": "a", "class": "m:P", "resources": {"gpu_compute": "most"}},
         {"name": "a", "class": "m:P", "batching": {"max_batch_size": "big"}},
@@ -121,6 +123,18 @@ def test_predictors_are_required():
 
     with pytest.raises(ValidationError):
         CogitoConfig(**data)
+
+
+def test_predictors_cannot_be_empty():
+    data = yaml.safe_load(V2_CONFIG)
+    data["predictors"] = []
+
+    with pytest.raises(ValidationError):
+        CogitoConfig(**data)
+
+
+def test_v1_predictor_field_is_not_dumped():
+    assert "predictor" not in load_v2_config().model_dump()
 
 
 def test_unknown_predictor_name():

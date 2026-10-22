@@ -19,7 +19,7 @@ class PredictorConfig(BaseModel):
     name: str
     class_path: str = Field(alias="class")
     route: Optional[RouteConfig] = None
-    threads: Optional[int] = 1
+    threads: int = Field(1, ge=1)
     resources: ResourcesConfig = Field(default_factory=ResourcesConfig)
     batching: Optional[BatchingConfig] = None
 
