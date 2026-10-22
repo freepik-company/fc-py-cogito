@@ -1,7 +1,7 @@
 from copy import deepcopy
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from cogito.core.config.v1.base import CogitoConfig as v1
 
@@ -21,6 +21,31 @@ class CogitoConfig(v1):
     predictors: List[PredictorConfig] = Field(min_length=1)
     # v1's single predictor, replaced by predictors: kept off the v2 file.
     predictor: str = Field("", exclude=True)
+
+    @model_validator(mode="after")
+    def _validate_unique_predictors(self):
+        # Predictors without a route are not compared: they have no path yet.
+        names = set()
+        paths = {}
+        for predictor in self.predictors:
+            if predictor.name in names:
+                raise ValueError(
+                    f"predictor names must be unique, '{predictor.name}' is "
+                    f"declared more than once"
+                )
+            names.add(predictor.name)
+
+            if predictor.get_route_path is None:
+                continue
+            # '/v1/sdxl' and '/v1/sdxl/' reach the same handler.
+            path = predictor.get_route_path.rstrip("/") or "/"
+            if path in paths:
+                raise ValueError(
+                    f"route paths must be unique, '{path}' is declared by "
+                    f"predictors '{paths[path]}' and '{predictor.name}'"
+                )
+            paths[path] = predictor.name
+        return self
 
     @classmethod
     def default(cls):
