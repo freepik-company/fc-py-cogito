@@ -4,18 +4,20 @@ import re
 import click
 
 from cogito.commands.scaffold import scaffold_predict_classes
-from cogito.core.config.file import CONFIG_VERSION_MAP, ConfigFile
+from cogito.core.config.file import (
+    CONFIG_VERSION_MAP,
+    DEFAULT_CONFIG_VERSION,
+    ConfigFile,
+)
 from cogito.core.config.v2 import PredictorConfig
 
+# First config version that declares a list of predictors
+PREDICTORS_CONFIG_VERSION = 2
 
-def _latest_config_version() -> int:
-    return max(CONFIG_VERSION_MAP.keys())
 
-
-def _init_with_default() -> ConfigFile:
-    version = _latest_config_version()
-    config_class = ConfigFile._get_config_class(version)
-    return ConfigFile(cogito=config_class.default(), config_version=version)
+def _init_with_default(config_version: int) -> ConfigFile:
+    config_class = ConfigFile._get_config_class(config_version)
+    return ConfigFile(cogito=config_class.default(), config_version=config_version)
 
 
 PREDICTOR_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
@@ -124,8 +126,7 @@ def _prompt_predictors(route_config_class) -> list:
             return predictors
 
 
-def _init_prompted() -> ConfigFile:
-    config_version = _latest_config_version()
+def _init_prompted(config_version: int) -> ConfigFile:
     config_class = ConfigFile._get_config_class(config_version)
 
     # Create instances of the necessary configuration classes
@@ -169,9 +170,19 @@ def _init_prompted() -> ConfigFile:
 
     click.echo("This starts to look like an amazing inference service!")
 
-    click.echo("Now let's declare the predictors served by this instance:")
+    route = None
+    predictors = None
+    route_config_class = config_class.get_route_config_class()
 
-    predictors = _prompt_predictors(config_class.get_route_config_class())
+    if config_version >= PREDICTORS_CONFIG_VERSION:
+        click.echo("Now let's declare the predictors served by this instance:")
+        predictors = _prompt_predictors(route_config_class)
+    elif click.confirm(
+        "Would you like to add a default route to the API?",
+        default=True,
+        show_default=True,
+    ):
+        route = route_config_class.default()
 
     cache_dir = click.prompt(
         "Cache directory for model weights and artifacts",
@@ -194,6 +205,7 @@ def _init_prompted() -> ConfigFile:
         description=description,
         version=version,
         fastapi=fastapi,
+        route=route,
         cache_dir=cache_dir,
         threads=1,
         readiness_file=readiness_file,
@@ -207,11 +219,18 @@ def _init_prompted() -> ConfigFile:
 
     # Create Cogito config
     cogito_config_class = config_class.get_cogito_config_class()
-    cogito = cogito_config_class(
-        server=server,
-        trainer="train:Trainer",
-        predictors=predictors,
-    )
+    if predictors is None:
+        cogito = cogito_config_class(
+            server=server,
+            trainer="train:Trainer",
+            predictor="predict:Predictor",
+        )
+    else:
+        cogito = cogito_config_class(
+            server=server,
+            trainer="train:Trainer",
+            predictors=predictors,
+        )
 
     return ConfigFile(cogito=cogito, config_version=config_version)
 
@@ -238,12 +257,21 @@ def _init_prompted() -> ConfigFile:
     default=False,
     help="Force initialization, even if already initialized",
 )
+@click.option(
+    "--config-version",
+    type=click.IntRange(1, max(CONFIG_VERSION_MAP.keys())),
+    default=DEFAULT_CONFIG_VERSION,
+    show_default=True,
+    help=f"Config version to generate ({PREDICTORS_CONFIG_VERSION} declares "
+    "several predictors)",
+)
 @click.pass_context
 def init(
     ctx: click.Context,
     scaffold: bool = False,
     default: bool = False,
     force: bool = False,
+    config_version: int = DEFAULT_CONFIG_VERSION,
 ) -> None:
     """Initialize the project configuration"""
     config_path = (
@@ -256,9 +284,9 @@ def init(
         return
 
     if default:
-        config = _init_with_default()
+        config = _init_with_default(config_version)
     else:
-        config = _init_prompted()
+        config = _init_prompted(config_version)
 
     if scaffold:
         scaffold_predict_classes(config, force)

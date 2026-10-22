@@ -35,6 +35,37 @@ def test_init_default(runner, temp_dir):
 
     # Verify config file was created with default values as per cogito.yaml
     config = ConfigFile.load_from_file("cogito.yaml")
+
+    # Server-level defaults
+    assert config.cogito.server.name == "Cogito ergo sum"
+    assert config.cogito.server.version == "0.1.0"
+    assert config.cogito.server.cache_dir == "/tmp"
+    assert config.cogito.server.description == "Inference server"
+    assert config.cogito.server.threads == 1
+
+    # FastAPI defaults
+    assert config.cogito.server.fastapi.host == "0.0.0.0"
+    assert config.cogito.server.fastapi.port == 8000
+    assert config.cogito.server.readiness_file == "$HOME/readiness.lock"
+    assert config.cogito.server.fastapi.access_log is False
+    assert config.cogito.server.fastapi.debug is False
+
+    # Route defaults
+    assert config.cogito.server.route.name == "Predict"
+    assert config.cogito.server.route.description == "Make a single prediction"
+    assert config.cogito.server.route.path == "/v1/predict"
+    assert config.cogito.predictor == "predict:Predictor"
+    assert config.cogito.server.route.tags == ["predict"]
+
+
+def test_init_default_v2(runner, temp_dir):
+    result = runner.invoke(init, ["--default", "--config-version", "2"])
+    assert result.exit_code == 0
+    assert "Initializing..." in result.output
+    assert os.path.exists("cogito.yaml")
+
+    # Verify config file was created with default values as per cogito.yaml
+    config = ConfigFile.load_from_file("cogito.yaml")
     assert config.config_version == 2
 
     # Server-level defaults
@@ -74,6 +105,46 @@ def test_init_prompted(runner, temp_dir):
         "8080",  # port
         "n",  # debug mode
         "n",  # access log
+        "y",  # add default route
+        "/tmp/cache",  # cache_dir
+        ".cogito-readiness.lock",  # readiness file
+    ]
+
+    result = runner.invoke(init, input="\n".join(inputs))
+    assert result.exit_code == 0
+    assert "Initializing..." in result.output
+    assert os.path.exists("cogito.yaml")
+
+    # Verify config file was created with prompted values
+    config = ConfigFile.load_from_file("cogito.yaml")
+    assert config.cogito.server.name == "Test Project"
+    assert config.cogito.server.description == "Test Description"
+    assert config.cogito.server.version == "0.1.0"
+    assert config.cogito.server.fastapi.host == "localhost"
+    assert config.cogito.server.fastapi.port == 8080
+    assert config.cogito.server.fastapi.debug is False
+    assert config.cogito.server.fastapi.access_log is False
+    assert config.cogito.server.cache_dir == "/tmp/cache"
+
+    # Route defaults remain (since the prompted version still uses the default values)
+    assert config.cogito.server.route.name == "Predict"
+    assert config.cogito.server.route.description == "Make a single prediction"
+    assert config.cogito.server.route.path == "/v1/predict"
+    assert config.cogito.predictor == "predict:Predictor"
+    assert config.cogito.server.route.tags == ["predict"]
+    assert config.cogito.server.readiness_file == ".cogito-readiness.lock"
+
+
+def test_init_prompted_v2(runner, temp_dir):
+    # Mock user input values
+    inputs = [
+        "Test Project",  # name
+        "Test Description",  # description
+        "0.1.0",  # version
+        "localhost",  # host
+        "8080",  # port
+        "n",  # debug mode
+        "n",  # access log
         "",  # predictor name (default)
         "",  # predictor class (default)
         "",  # route path (default)
@@ -83,7 +154,7 @@ def test_init_prompted(runner, temp_dir):
         ".cogito-readiness.lock",  # readiness file
     ]
 
-    result = runner.invoke(init, input="\n".join(inputs))
+    result = runner.invoke(init, ["--config-version", "2"], input="\n".join(inputs))
     assert result.exit_code == 0
     assert "Initializing..." in result.output
     assert os.path.exists("cogito.yaml")
@@ -134,6 +205,8 @@ def test_init_force(runner, temp_dir):
     assert "Initializing..." in result.output
 
 
+V2 = ["--config-version", "2"]
+
 SERVER_INPUTS = [
     "Test Project",  # name
     "Test Description",  # description
@@ -167,7 +240,7 @@ def test_init_prompted_several_predictors(runner, temp_dir):
         + FILE_INPUTS
     )
 
-    result = runner.invoke(init, input="\n".join(inputs))
+    result = runner.invoke(init, V2, input="\n".join(inputs))
     assert result.exit_code == 0, result.output
 
     config = ConfigFile.load_from_file("cogito.yaml")
@@ -209,7 +282,7 @@ def test_init_prompted_rejects_duplicates_and_bad_class(runner, temp_dir):
         + FILE_INPUTS
     )
 
-    result = runner.invoke(init, input="\n".join(inputs))
+    result = runner.invoke(init, V2, input="\n".join(inputs))
     assert result.exit_code == 0, result.output
     assert "'predictor' is already used by another predictor." in result.output
     assert "'/v1/predict' is already used by another predictor." in result.output
@@ -223,7 +296,7 @@ def test_init_prompted_rejects_duplicates_and_bad_class(runner, temp_dir):
 
 
 def test_init_writes_the_v2_schema(runner, temp_dir):
-    result = runner.invoke(init, ["--default"])
+    result = runner.invoke(init, ["--default", *V2])
     assert result.exit_code == 0
 
     with open("cogito.yaml") as file:
@@ -238,6 +311,14 @@ def test_init_writes_the_v2_schema(runner, temp_dir):
 
 def test_init_default_scaffold(runner, temp_dir):
     result = runner.invoke(init, ["--default", "--scaffold"])
+    assert result.exit_code == 0, result.output
+    assert ConfigFile.load_from_file("cogito.yaml").config_version == 1
+    with open("predict.py") as file:
+        compile(file.read(), "predict.py", "exec")
+
+
+def test_init_default_scaffold_v2(runner, temp_dir):
+    result = runner.invoke(init, ["--default", "--scaffold", *V2])
     assert result.exit_code == 0, result.output
     assert os.path.exists("predict.py")
 
@@ -266,7 +347,7 @@ def test_init_scaffold_several_predictors(runner, temp_dir):
         + FILE_INPUTS
     )
 
-    result = runner.invoke(init, ["--scaffold"], input="\n".join(inputs))
+    result = runner.invoke(init, ["--scaffold", *V2], input="\n".join(inputs))
     assert result.exit_code == 0, result.output
 
     for file_name, path in (
@@ -324,7 +405,7 @@ def test_init_prompted_validates_names_and_paths(runner, temp_dir):
         + FILE_INPUTS
     )
 
-    result = runner.invoke(init, ["--scaffold"], input="\n".join(inputs))
+    result = runner.invoke(init, ["--scaffold", *V2], input="\n".join(inputs))
     assert result.exit_code == 0, result.output
     assert "'/v1/predict' is already used by another predictor." in result.output
 
@@ -336,8 +417,14 @@ def test_init_prompted_validates_names_and_paths(runner, temp_dir):
 
 
 def test_upgrade_refuses_to_downgrade_a_v2_config(runner, temp_dir):
-    runner.invoke(init, ["--default"])
+    runner.invoke(init, ["--default", *V2])
     config = ConfigFile.load_from_file("cogito.yaml")
 
     with pytest.raises(ValueError, match="Cannot upgrade config version 2"):
         config.upgrade()
+
+
+def test_init_rejects_unknown_config_version(runner, temp_dir):
+    result = runner.invoke(init, ["--default", "--config-version", "3"])
+    assert result.exit_code != 0
+    assert not os.path.exists("cogito.yaml")
