@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import List
 
 from pydantic import Field
@@ -6,6 +7,7 @@ from cogito.core.config.v1.base import CogitoConfig as v1
 
 from cogito.core.config.v2.fastapi import FastAPIConfig
 from cogito.core.config.v2.predictor import PredictorConfig
+from cogito.core.config.v2.resources import ResourcesConfig
 from cogito.core.config.v2.route import RouteConfig
 from cogito.core.config.v2.server import ServerConfig
 
@@ -75,3 +77,38 @@ class CogitoConfig(v1):
                 f"{len(self.predictors)}: use get_predictors instead"
             )
         return self.predictors[0].class_path
+
+    def upgrade(self, version: int, config):
+        """Upgrade the configuration to a newer version."""
+
+        if config is None or version >= 2:
+            return config
+
+        # Work on a copy: the v1 upgrade mutates the configuration it receives
+        previous_config = deepcopy(config)
+        if version < 1:
+            previous_config = v1.default().upgrade(version, previous_config)
+
+        # The v1 single predictor becomes the only item of predictors
+        route = previous_config.server.route
+        if route is not None:
+            route = RouteConfig(
+                name=route.name,
+                description=route.description,
+                path=route.path,
+                tags=route.tags if isinstance(route.tags, list) else [],
+            )
+
+        return __class__(
+            server=ServerConfig(**previous_config.server.model_dump(exclude={"route"})),
+            trainer=previous_config.trainer,
+            predictors=[
+                PredictorConfig(
+                    name="predictor",
+                    class_path=previous_config.predictor,
+                    route=route,
+                    threads=previous_config.server.threads or 1,
+                    resources=ResourcesConfig.default(),
+                )
+            ],
+        )
