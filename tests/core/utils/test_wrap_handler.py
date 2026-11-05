@@ -1,6 +1,7 @@
 import asyncio
 import json
 import threading
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -199,8 +200,13 @@ class _SyncInput(BaseModel):
     input: str
 
 
-def _run_in_flight(wrapped_handler, started, count):
-    """Start `count` requests in their own threads and wait until all are inside."""
+@contextmanager
+def _in_flight(wrapped_handler, started, release, count):
+    """Keep `count` requests running in their own threads while the block runs.
+
+    On exit, whether the block failed or not, the requests are let through and
+    their threads joined, so a failed assertion leaves nothing behind.
+    """
     results = []
     threads = [
         threading.Thread(
@@ -208,24 +214,27 @@ def _run_in_flight(wrapped_handler, started, count):
         )
         for _ in range(count)
     ]
-    for thread in threads:
-        thread.start()
-    for _ in range(count):
-        assert started.acquire(timeout=5)
-    return threads, results
+    try:
+        for thread in threads:
+            thread.start()
+        for _ in range(count):
+            assert started.acquire(timeout=5)
+        yield results
+    finally:
+        release.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(timeout=5)
 
 
 @pytest.mark.parametrize("threads", [1, 2])
 def test_wrap_handler_sync_rejects_requests_above_threads(threads):
     wrapped_handler, started, release = _blocking_sync_handler(threads)
 
-    in_flight, results = _run_in_flight(wrapped_handler, started, threads)
-    with pytest.raises(NoThreadsAvailableError):
-        wrapped_handler(_SyncInput(input="x"))
+    with _in_flight(wrapped_handler, started, release, threads) as results:
+        with pytest.raises(NoThreadsAvailableError):
+            wrapped_handler(_SyncInput(input="x"))
 
-    release.set()
-    for thread in in_flight:
-        thread.join(timeout=5)
     assert [r.result for r in results] == ["x"] * threads
 
 
@@ -237,11 +246,9 @@ def test_wrap_handler_sync_limit_does_not_drift():
         assert started.acquire(timeout=5)
 
     release.clear()
-    in_flight, _ = _run_in_flight(wrapped_handler, started, 1)
-    with pytest.raises(NoThreadsAvailableError):
-        wrapped_handler(_SyncInput(input="x"))
-    release.set()
-    in_flight[0].join(timeout=5)
+    with _in_flight(wrapped_handler, started, release, 1):
+        with pytest.raises(NoThreadsAvailableError):
+            wrapped_handler(_SyncInput(input="x"))
 
 
 @pytest.mark.parametrize("error", [RuntimeError("boom"), BadRequestError("bad")])
