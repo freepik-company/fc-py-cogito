@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import os
 import sys
@@ -107,7 +108,6 @@ class Application:
 
         map_route_to_model: Dict[str, str] = {}
         self.map_model_to_instance: Dict[str, BasePredictor] = {}
-        semaphores = create_routes_semaphores(self.config)
 
         route = self.config.cogito.get_route
         route_path = self.config.cogito.get_route_path
@@ -126,6 +126,9 @@ class Application:
 
         model = self.map_model_to_instance.get(predictor_string)
         response_model = get_predictor_handler_return_type(model)
+        semaphores = create_routes_semaphores(
+            self.config, is_async=inspect.iscoroutinefunction(model.predict)
+        )
 
         handler = wrap_handler(
             descriptor=predictor_string,

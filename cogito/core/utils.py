@@ -4,10 +4,11 @@ import importlib
 import inspect
 import logging
 import os
+import threading
 import time
 import traceback
 from inspect import Parameter, signature
-from typing import Any, Callable, Dict, Iterator, get_type_hints
+from typing import Any, Callable, Dict, Iterator, Optional, Union, get_type_hints
 
 try:
     # Pydantic v2
@@ -89,7 +90,7 @@ def wrap_handler(
     descriptor: str,
     original_handler: Callable,
     response_model: ResultResponse,
-    semaphore: asyncio.Semaphore = None,
+    semaphore: Optional[Union[asyncio.Semaphore, threading.Semaphore]] = None,
     config: ConfigFile = None,
 ) -> Callable:
     class_name, input_model = create_request_model(descriptor, original_handler)
@@ -182,9 +183,10 @@ def wrap_handler(
             if not semaphore:
                 return timed_handler(input)
             else:
-                if semaphore.locked():
+                # Runs in a threadpool thread: the semaphore must be a
+                # threading one, acquired without blocking.
+                if not semaphore.acquire(blocking=False):
                     raise NoThreadsAvailableError(descriptor)
-                semaphore.acquire()
                 try:
                     return timed_handler(input)
                 finally:
@@ -236,10 +238,19 @@ def model_download(model_path: str) -> str:
         raise ModelDownloadError(model_path, e)
 
 
-def create_routes_semaphores(config: ConfigFile) -> Dict[str, asyncio.Semaphore]:
+def create_routes_semaphores(
+    config: ConfigFile, is_async: bool
+) -> Dict[str, Union[asyncio.Semaphore, threading.BoundedSemaphore]]:
+    """Create the semaphore that limits the predictor to `server.threads`.
+
+    An async predictor runs on the event loop, so it gets an asyncio.Semaphore.
+    A sync predictor runs in FastAPI's threadpool, so it needs a thread-safe
+    threading.BoundedSemaphore instead.
+    """
+    threads = config.cogito.get_server_threads
     semaphores = {}
-    semaphores[config.cogito.get_predictor] = asyncio.Semaphore(
-        config.cogito.get_server_threads
+    semaphores[config.cogito.get_predictor] = (
+        asyncio.Semaphore(threads) if is_async else threading.BoundedSemaphore(threads)
     )
 
     return semaphores
