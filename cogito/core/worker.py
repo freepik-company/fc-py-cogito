@@ -320,9 +320,9 @@ fd = int(sys.argv[1])
 while os.read(fd, 1):
     pass
 group = os.getpgrp()
-# Out of the group first: on macOS a member sending SIGKILL to its own group only
-# kills itself.
-os.setpgid(0, 0)
+if sys.platform == "darwin":
+    # On macOS a member sending SIGKILL to its own group only kills itself.
+    os.setpgid(0, 0)
 try:
     os.killpg(group, signal.SIGKILL)
 except ProcessLookupError:
@@ -348,20 +348,21 @@ def _start_gateway_watchdog() -> None:
       write end only the gateway holds, open for as long as the gateway lives and
       never written to. EOF means the gateway is gone (already, if it died while
       the worker bootstrapped), and the watchdog then SIGKILLs its process group:
-      the worker and every process its predictor started. It leaves the group
-      right before, since on macOS a member's SIGKILL to its own group only kills
-      itself, and then exits.
-    - It never targets a group it was told about, only the one it belongs to: up
-      to that moment its membership keeps the group's id from being reused, and
-      right after, the processes left in the group do (with none left, there is
+      the worker, every process its predictor started and itself. On macOS,
+      where a member's SIGKILL to its own group only kills itself, it leaves the
+      group right before, and then exits.
+    - It never targets a group it was told about, only the one it belongs to,
+      whose id its membership keeps from being reused. On macOS, once it has left
+      the group, the processes still in it keep the id (with none left, there is
       nothing to kill).
     - Otherwise it dies with the worker's group: from the SIGTERM a worker sends to
       its group after a graceful stop, or from the SIGKILL the gateway sends to
       the group once it has reaped a worker that crashed, failed to start or was
       stopped or terminated.
 
-    It inherits no other fd: it holds neither the request pipe nor the process
-    sentinel the gateway uses to see the worker exit. If it cannot be started,
+    It inherits no other fd, not even the worker's standard streams: it holds
+    neither the request pipe nor the process sentinel the gateway uses to see the
+    worker exit. If it cannot be started,
     the worker runs without it, relying on the checks inside the worker.
     """
     global _watchdog
@@ -376,6 +377,7 @@ def _start_gateway_watchdog() -> None:
             pass_fds=(lifeline,),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
     except OSError:
         _logger.warning(

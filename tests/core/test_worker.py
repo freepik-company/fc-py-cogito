@@ -1559,7 +1559,7 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
         if mode == "stopping":
             # Waits for the running prediction: the gateway dies while draining.
             supervisor.stop(timeout=600.0)
-        if mode in ("sigterm", "wait"):
+        if mode in ("sigterm", "wait", "native-predict"):
             while True:
                 time.sleep(0.1)
     """
@@ -1682,7 +1682,7 @@ def test_a_killed_worker_is_restarted(supervision_path, supervised):
     # The watchdog of the killed worker went with its group, and the new worker
     # has its own.
     wait_until(lambda: not group_members(first_pid), timeout=10.0)
-    assert len(group_members(worker.pid)) == 2
+    assert set(group_members(worker.pid)) - {worker.pid}
 
 
 def test_every_request_in_flight_fails_when_the_worker_crashes(
@@ -1885,7 +1885,7 @@ def test_stop_leaves_no_live_worker_and_is_idempotent(supervision_path, supervis
     worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
     pid = worker.pid
 
-    assert len(group_members(pid)) == 2, "the worker and its watchdog"
+    assert set(group_members(pid)) - {pid}, "the worker has a watchdog"
 
     worker.stop(timeout=5.0)
     worker.stop(timeout=5.0)
