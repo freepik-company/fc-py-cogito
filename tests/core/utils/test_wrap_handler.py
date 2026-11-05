@@ -1,12 +1,16 @@
 import asyncio
 import json
+import threading
 from unittest.mock import MagicMock
+
+import pytest
 
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from cogito.api.responses import ResultResponse
-from cogito.core.utils import wrap_handler
+from cogito.core.exceptions import BadRequestError, NoThreadsAvailableError
+from cogito.core.utils import create_routes_semaphores, wrap_handler
 
 from pydantic._internal._model_construction import ModelMetaclass
 
@@ -168,3 +172,108 @@ def test_wrap_handler_async_omits_traceback_when_disabled():
     response = asyncio.run(wrapped_handler(InputModel(input="World")))
     payload = json.loads(response.body)
     assert payload == {"message": "async boom"}
+
+
+def _blocking_sync_handler(threads: int):
+    """A sync predictor that blocks until `release` is set, behind `threads`."""
+    started = threading.Semaphore(0)
+    release = threading.Event()
+
+    class BlockingPredictor:
+        def predict(self, input: str) -> str:
+            started.release()
+            release.wait(timeout=10)
+            return input
+
+    semaphore = threading.BoundedSemaphore(threads)
+    wrapped_handler = wrap_handler(
+        "predict:BlockingPredictor",
+        BlockingPredictor().predict,
+        ResultResponse,
+        semaphore=semaphore,
+    )
+    return wrapped_handler, started, release
+
+
+class _SyncInput(BaseModel):
+    input: str
+
+
+def _run_in_flight(wrapped_handler, started, count):
+    """Start `count` requests in their own threads and wait until all are inside."""
+    results = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(wrapped_handler(_SyncInput(input="x")))
+        )
+        for _ in range(count)
+    ]
+    for thread in threads:
+        thread.start()
+    for _ in range(count):
+        assert started.acquire(timeout=5)
+    return threads, results
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_wrap_handler_sync_rejects_requests_above_threads(threads):
+    wrapped_handler, started, release = _blocking_sync_handler(threads)
+
+    in_flight, results = _run_in_flight(wrapped_handler, started, threads)
+    with pytest.raises(NoThreadsAvailableError):
+        wrapped_handler(_SyncInput(input="x"))
+
+    release.set()
+    for thread in in_flight:
+        thread.join(timeout=5)
+    assert [r.result for r in results] == ["x"] * threads
+
+
+def test_wrap_handler_sync_limit_does_not_drift():
+    wrapped_handler, started, release = _blocking_sync_handler(1)
+    release.set()
+    for _ in range(5):
+        assert wrapped_handler(_SyncInput(input="x")).result == "x"
+        assert started.acquire(timeout=5)
+
+    release.clear()
+    in_flight, _ = _run_in_flight(wrapped_handler, started, 1)
+    with pytest.raises(NoThreadsAvailableError):
+        wrapped_handler(_SyncInput(input="x"))
+    release.set()
+    in_flight[0].join(timeout=5)
+
+
+@pytest.mark.parametrize("error", [RuntimeError("boom"), BadRequestError("bad")])
+def test_wrap_handler_sync_releases_thread_on_error(error):
+    class FailingPredictor:
+        def predict(self, input: str) -> str:
+            raise error
+
+    semaphore = threading.BoundedSemaphore(1)
+    wrapped_handler = wrap_handler(
+        "predict:FailingPredictor",
+        FailingPredictor().predict,
+        ResultResponse,
+        semaphore=semaphore,
+    )
+
+    for _ in range(2):
+        try:
+            wrapped_handler(_SyncInput(input="x"))
+        except BadRequestError:
+            pass
+    assert semaphore.acquire(blocking=False)
+
+
+@pytest.mark.parametrize(
+    "is_async, expected",
+    [(True, asyncio.Semaphore), (False, threading.BoundedSemaphore)],
+)
+def test_create_routes_semaphores_matches_predictor_kind(is_async, expected):
+    config = MagicMock()
+    config.cogito.get_predictor = "predict:Predictor"
+    config.cogito.get_server_threads = 3
+
+    semaphore = create_routes_semaphores(config, is_async=is_async)["predict:Predictor"]
+    assert isinstance(semaphore, expected)
