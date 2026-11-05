@@ -8,6 +8,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -215,6 +216,8 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
     # keep the worker's pipes open after it is gone.
     if hasattr(os, "setpgrp"):
         os.setpgrp()
+    # Before anything that may run native code holding the GIL.
+    _start_gateway_watchdog()
     # The pipe only tells a worker reading requests that its gateway is gone. One
     # loading its predictor, or draining requests after a stop, must notice too.
     # The pid multiprocessing recorded at spawn: os.getppid() would already be the
@@ -307,6 +310,79 @@ def _stop_own_process_group() -> None:
     # The worker leads the group: it ignores the signal it sends to the rest.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     os.killpg(os.getpgrp(), signal.SIGTERM)
+
+
+# Run by the watchdog process with the fd of the worker's lifeline to its gateway.
+_WATCHDOG_SOURCE = """
+import os, signal, sys
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+fd = int(sys.argv[1])
+while os.read(fd, 1):
+    pass
+group = os.getpgrp()
+if sys.platform == "darwin":
+    # On macOS a member sending SIGKILL to its own group only kills itself.
+    os.setpgid(0, 0)
+try:
+    os.killpg(group, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+"""
+
+# The watchdog of this worker process, if it has one.
+_watchdog: Optional[subprocess.Popen] = None
+
+
+def _start_gateway_watchdog() -> None:
+    """
+    Start a process that kills this worker's process group when the gateway dies.
+
+    The gateway-death checks inside the worker (_watch_gateway, EOF on the request
+    pipe) are Python code in this interpreter: none of it runs while the predictor
+    runs native code that holds the GIL, while loading or predicting. The watchdog is a separate,
+    minimal interpreter that does not depend on this one.
+
+    Lifecycle:
+    - It starts before the predictor is loaded, in the worker's own process group.
+    - It blocks reading the worker's parent sentinel: the read end of a pipe whose
+      write end only the gateway holds, open for as long as the gateway lives and
+      never written to. EOF means the gateway is gone (already, if it died while
+      the worker bootstrapped), and the watchdog then SIGKILLs its process group:
+      the worker, every process its predictor started and itself. On macOS,
+      where a member's SIGKILL to its own group only kills itself, it leaves the
+      group right before, and then exits.
+    - It never targets a group it was told about, only the one it belongs to,
+      whose id its membership keeps from being reused. On macOS, once it has left
+      the group, the processes still in it keep the id (with none left, there is
+      nothing to kill).
+    - Otherwise it dies with the worker's group: from the SIGTERM a worker sends to
+      its group after a graceful stop, or from the SIGKILL the gateway sends to
+      the group once it has reaped a worker that crashed, failed to start or was
+      stopped or terminated.
+
+    It inherits no other fd, not even the worker's standard streams: it holds
+    neither the request pipe nor the process sentinel the gateway uses to see the
+    worker exit. If it cannot be started,
+    the worker runs without it, relying on the checks inside the worker.
+    """
+    global _watchdog
+    gateway = multiprocessing.parent_process()
+    # Only in a group of its own: otherwise it would kill the gateway's group.
+    if gateway is None or not hasattr(os, "killpg") or os.getpgrp() != os.getpid():
+        return
+    lifeline = gateway.sentinel
+    try:
+        _watchdog = subprocess.Popen(
+            [sys.executable, "-I", "-c", _WATCHDOG_SOURCE, str(lifeline)],
+            pass_fds=(lifeline,),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        _logger.warning(
+            "Unable to start the gateway watchdog of the worker", exc_info=True
+        )
 
 
 def _watch_gateway(gateway_pid: int) -> None:

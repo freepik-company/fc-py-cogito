@@ -1318,7 +1318,9 @@ SUPERVISION_PREDICTORS = {
     """,
     # Forks a helper that outlives the request (optionally ignoring SIGTERM) and
     # returns its pid; or sleeps for delay and returns the worker's pid.
+    # native_sleep sleeps in native code that keeps the GIL instead.
     "cogito_helper_predictor": """
+        import ctypes
         import os
         import signal
         import time
@@ -1333,8 +1335,11 @@ SUPERVISION_PREDICTORS = {
                 spawn_helper: bool = False,
                 ignore_sigterm: bool = False,
                 delay: float = 0.0,
+                native_sleep: int = 0,
                 padding: str = "",
             ) -> int:
+                if native_sleep:
+                    ctypes.PyDLL(None).sleep(native_sleep)
                 if not spawn_helper:
                     time.sleep(delay)
                     return os.getpid()
@@ -1417,6 +1422,29 @@ SUPERVISION_PREDICTORS = {
             def predict(self) -> int:
                 return os.getpid()
     """,
+    # The same, loading in native code that keeps the GIL for a minute.
+    "cogito_native_load_predictor": """
+        import ctypes
+        import json
+        import os
+        import time
+
+        helper = os.fork()
+        if helper == 0:
+            time.sleep(60)
+            os._exit(0)
+        with open(os.environ["COGITO_TEST_OUT"], "w") as out:
+            json.dump([os.getpid(), helper], out)
+        ctypes.PyDLL(None).sleep(60)
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self) -> int:
+                return os.getpid()
+    """,
     # Fails to load while the file named by COGITO_TEST_MARKER exists, and loads
     # slowly while the one named by COGITO_TEST_SLOW exists.
     "cogito_flaky_predictor": """
@@ -1443,9 +1471,11 @@ SUPERVISION_PREDICTORS = {
 # worker is still blocked (also with a helper the worker forked holding the pipe);
 # waits for SIGTERM the way uvicorn does (a handler that
 # leaves the interpreter normally); or waits with a helper forked by a worker
-# that ignores SIGTERM and a prediction still running; or does the same and then
-# stops, waiting for that prediction; or never finishes loading its predictor
-# (also after a slow worker bootstrap, during which the gateway dies).
+# that ignores SIGTERM and a prediction still running (also one running native
+# code that keeps the GIL); or does the same and then stops, waiting for that
+# prediction; or never finishes loading its predictor (also after a slow worker
+# bootstrap, during which the gateway dies, and also in native code that keeps
+# the GIL).
 SUPERVISOR_LAUNCHER = textwrap.dedent(
     """
     import asyncio
@@ -1472,11 +1502,16 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         if mode == "bootstrap":
             os.environ["COGITO_TEST_BOOT"] = sys.argv[1] + ".boot"
-        if mode in ("loading", "bootstrap"):
+        if mode in ("loading", "bootstrap", "native-loading"):
             # The predictor itself writes the pids, and never finishes loading.
             os.environ["COGITO_TEST_OUT"] = sys.argv[1]
+            module = (
+                "cogito_native_load_predictor"
+                if mode == "native-loading"
+                else "cogito_slow_load_predictor"
+            )
             WorkerSupervisor(
-                [WorkerSpec(name="slow", class_path="cogito_slow_load_predictor:Predictor")],
+                [WorkerSpec(name="slow", class_path=f"{module}:Predictor")],
                 start_timeout=600.0,
             ).start()
         supervisor = WorkerSupervisor(
@@ -1489,7 +1524,7 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
         )
         supervisor.start()
         pids = [worker.pid for worker in supervisor]
-        if mode in ("blocked-helper", "wait", "stopping"):
+        if mode in ("blocked-helper", "wait", "stopping", "native-predict"):
             # A helper the worker forked, which holds its end of the pipe as well.
             pids.append(
                 asyncio.run(
@@ -1498,11 +1533,12 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
                     )
                 )
             )
-        if mode in ("wait", "stopping"):
+        if mode in ("wait", "stopping", "native-predict"):
             # A prediction still running when the gateway goes away.
+            inputs = {"native_sleep": 60} if mode == "native-predict" else {"delay": 60.0}
             threading.Thread(
                 target=asyncio.run,
-                args=(supervisor["second"].predict({"delay": 60.0}),),
+                args=(supervisor["second"].predict(inputs),),
                 daemon=True,
             ).start()
             time.sleep(0.5)
@@ -1523,7 +1559,7 @@ SUPERVISOR_LAUNCHER = textwrap.dedent(
         if mode == "stopping":
             # Waits for the running prediction: the gateway dies while draining.
             supervisor.stop(timeout=600.0)
-        if mode in ("sigterm", "wait"):
+        if mode in ("sigterm", "wait", "native-predict"):
             while True:
                 time.sleep(0.1)
     """
@@ -1573,6 +1609,21 @@ def pid_exists(pid):
     except ProcessLookupError:
         return False
     return True
+
+
+def group_members(pgid):
+    """Pids of the live processes in a process group."""
+    output = subprocess.run(
+        ["ps", "-A", "-o", "pid=,pgid=,stat="],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return [
+        int(pid)
+        for pid, group, stat in (line.split()[:3] for line in output.splitlines())
+        if int(group) == pgid and not stat.startswith("Z")
+    ]
 
 
 def restart_delays(caplog, name):
@@ -1628,6 +1679,10 @@ def test_a_killed_worker_is_restarted(supervision_path, supervised):
     wait_until(lambda: worker.restarts == 1 and worker.is_available())
     assert worker.pid != first_pid
     assert not pid_exists(first_pid)
+    # The watchdog of the killed worker went with its group, and the new worker
+    # has its own.
+    wait_until(lambda: not group_members(first_pid), timeout=10.0)
+    assert set(group_members(worker.pid)) - {worker.pid}
 
 
 def test_every_request_in_flight_fails_when_the_worker_crashes(
@@ -1830,10 +1885,13 @@ def test_stop_leaves_no_live_worker_and_is_idempotent(supervision_path, supervis
     worker = supervise(supervised, "crashy", "cogito_crashy_predictor")
     pid = worker.pid
 
+    assert set(group_members(pid)) - {pid}, "the worker has a watchdog"
+
     worker.stop(timeout=5.0)
     worker.stop(timeout=5.0)
 
     assert not pid_exists(pid)
+    wait_until(lambda: not group_members(pid), timeout=10.0)
     assert not multiprocessing.active_children()
     with pytest.raises(WorkerUnavailableError) as error:
         asyncio.run(worker.predict({}))
@@ -1904,6 +1962,11 @@ def launchers():
             # A frozen worker never sees its pipe close.
             if pid_exists(pid):
                 os.kill(pid, signal.SIGKILL)
+            # Its watchdog too: a worker's pid is its process group id.
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
 
 def run_supervisor_launcher(launchers, path, mode):
@@ -1929,6 +1992,8 @@ def test_no_worker_is_left_when_the_gateway_returns_without_stopping(
 
     assert process.wait(timeout=60) == 0
     assert not any(pid_exists(pid) for pid in pids)
+    # No watchdog either.
+    wait_until(lambda: not any(group_members(pid) for pid in pids), timeout=10.0)
 
 
 def test_no_worker_is_left_when_exiting_with_a_send_still_blocked(
@@ -1965,6 +2030,8 @@ def test_no_worker_is_left_after_sigterm(supervision_path, launchers):
 
     assert process.wait(timeout=60) == 0
     assert not any(pid_exists(pid) for pid in pids)
+    # No watchdog either.
+    wait_until(lambda: not any(group_members(pid) for pid in pids), timeout=10.0)
 
 
 def test_workers_exit_when_the_gateway_is_killed(supervision_path, launchers):
@@ -1976,6 +2043,27 @@ def test_workers_exit_when_the_gateway_is_killed(supervision_path, launchers):
     # Their parent is gone: whoever adopts them reaps them once they exit. Well
     # before the helper (the last pid) would exit on its own after 60s.
     wait_until(lambda: not any(pid_exists(pid) for pid in pids), timeout=15.0)
+
+
+@pytest.mark.parametrize("mode", ["native-loading", "native-predict"])
+def test_workers_exit_when_the_gateway_is_killed_while_native_code_keeps_the_gil(
+    supervision_path, launchers, mode
+):
+    # A minute of native code that keeps the GIL, while loading the predictor or
+    # while predicting: no thread of the worker can run meanwhile.
+    process, pids = run_supervisor_launcher(launchers, supervision_path, mode)
+    workers = pids[:1] if mode == "native-loading" else pids[:2]
+
+    process.kill()
+    process.wait(timeout=60)
+
+    # Workers, their helpers and their watchdogs, well before the native call
+    # returns.
+    wait_until(
+        lambda: not any(pid_exists(pid) for pid in pids)
+        and not any(group_members(pid) for pid in workers),
+        timeout=15.0,
+    )
 
 
 def test_unavailable_worker_surfaces_as_503_with_a_clear_message(
