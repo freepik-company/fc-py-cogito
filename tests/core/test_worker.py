@@ -1930,6 +1930,98 @@ def test_supervisor_stops_the_started_workers_when_one_cannot_start(supervision_
     assert not multiprocessing.active_children()
 
 
+def degraded_mode_warnings(caplog):
+    return [
+        record
+        for record in caplog.records
+        if record.getMessage()
+        == "GPU limits are not enforced: CUDA MPS is not running (degraded mode)"
+    ]
+
+
+def test_supervisor_warns_once_about_limits_mps_does_not_enforce(caplog):
+    caplog.set_level(logging.WARNING, logger="cogito.core.worker")
+    supervisor = WorkerSupervisor(
+        [
+            WorkerSpec(name="sdxl", class_path="m:P", gpu_compute=0.5),
+            WorkerSpec(
+                name="clip", class_path="m:P", gpu_memory_limit=1024**3, mps=False
+            ),
+            WorkerSpec(
+                name="flux", class_path="m:P", gpu_memory_limit=1024**3, gpu_compute=1
+            ),
+        ]
+    )
+
+    supervisor._warn_unenforced_limits()
+
+    [record] = degraded_mode_warnings(caplog)
+    assert record.predictors == {
+        "sdxl": "compute share not enforced",
+        "clip": "memory cap applied to PyTorch's allocator only",
+        "flux": "compute share not enforced, "
+        "memory cap applied to PyTorch's allocator only",
+    }
+
+
+def test_no_degraded_mode_warning_when_limits_are_enforced_or_unneeded(
+    tmp_path, caplog
+):
+    caplog.set_level(logging.WARNING, logger="cogito.core.worker")
+    os.mkfifo(tmp_path / "control")
+    supervisor = WorkerSupervisor(
+        [
+            WorkerSpec(name="no-limits", class_path="m:P"),
+            WorkerSpec(name="forced", class_path="m:P", gpu_compute=0.5, mps=True),
+            WorkerSpec(
+                name="detected",
+                class_path="m:P",
+                gpu_compute=0.5,
+                env={"CUDA_MPS_PIPE_DIRECTORY": str(tmp_path)},
+            ),
+            WorkerSpec(
+                name="cpu", class_path="m:P", gpu_compute=0.5, cuda_visible_devices=""
+            ),
+            WorkerSpec(
+                name="cpu-env",
+                class_path="m:P",
+                gpu_memory_limit=1024**3,
+                env={"CUDA_VISIBLE_DEVICES": ""},
+            ),
+        ]
+    )
+
+    supervisor._warn_unenforced_limits()
+
+    assert not degraded_mode_warnings(caplog)
+
+
+def test_degraded_mode_warning_is_not_repeated_on_restart(supervision_path, caplog):
+    caplog.set_level(logging.WARNING, logger="cogito.core.worker")
+    supervisor = WorkerSupervisor(
+        [
+            WorkerSpec(
+                name="crashy",
+                class_path="cogito_crashy_predictor:Predictor",
+                gpu_compute=0.5,
+            )
+        ],
+        policy=FAST_RESTARTS,
+        start_timeout=60.0,
+    )
+    supervisor.start()
+    try:
+        worker = supervisor["crashy"]
+        assert len(degraded_mode_warnings(caplog)) == 1
+
+        os.kill(worker.pid, signal.SIGKILL)
+        wait_until(lambda: worker.restarts == 1 and worker.is_available())
+
+        assert len(degraded_mode_warnings(caplog)) == 1
+    finally:
+        supervisor.stop(timeout=5.0)
+
+
 def test_supervisor_stops_every_worker(supervision_path):
     supervisor = WorkerSupervisor(
         [

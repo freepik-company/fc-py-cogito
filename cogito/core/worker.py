@@ -144,6 +144,35 @@ def _serves_mps(spec: WorkerSpec, env: Mapping[str, str]) -> bool:
     return mps_running(pipe_directory or DEFAULT_MPS_PIPE_DIRECTORY)
 
 
+def _unenforced_limits(spec: WorkerSpec) -> Optional[str]:
+    """
+    What CUDA MPS does not enforce of the GPU limits of spec, or None.
+
+    None when the worker has no limits, hides every GPU or is served by MPS.
+    Without MPS the compute share is not enforced at all, and the memory cap only
+    binds PyTorch's caching allocator.
+    """
+    if spec.gpu_memory_limit is None and spec.gpu_compute is None:
+        return None
+    env: Dict[str, str] = {}
+    if spec.cuda_visible_devices is not None:
+        env["CUDA_VISIBLE_DEVICES"] = spec.cuda_visible_devices
+    env.update(spec.env)
+    devices = env.get("CUDA_VISIBLE_DEVICES")
+    if devices is None:
+        devices = _inherited_env("CUDA_VISIBLE_DEVICES")
+    if devices is not None and not devices.strip():
+        return None
+    if _serves_mps(spec, env):
+        return None
+    unenforced = []
+    if spec.gpu_compute is not None:
+        unenforced.append("compute share not enforced")
+    if spec.gpu_memory_limit is not None:
+        unenforced.append("memory cap applied to PyTorch's allocator only")
+    return ", ".join(unenforced)
+
+
 def build_worker_env(spec: WorkerSpec) -> Dict[str, str]:
     """
     Environment variables a worker applies before importing its predictor
@@ -1491,12 +1520,29 @@ class WorkerSupervisor:
         with _RUNNING_LOCK:
             _RUNNING_SUPERVISORS.add(self)
         try:
+            self._warn_unenforced_limits()
             for worker in self._workers.values():
                 worker.start()
         except BaseException:
             # Stopping a worker that never started only releases its resources.
             self.stop()
             raise
+
+    def _warn_unenforced_limits(self) -> None:
+        """
+        Log once, at startup, the predictors whose GPU limits CUDA MPS does not
+        enforce (degraded mode). Not on restarts: they reuse the same specs.
+        """
+        degraded = {}
+        for worker in self._workers.values():
+            unenforced = _unenforced_limits(worker.spec)
+            if unenforced is not None:
+                degraded[worker.spec.name] = unenforced
+        if degraded:
+            _logger.warning(
+                "GPU limits are not enforced: CUDA MPS is not running (degraded mode)",
+                extra={"predictors": degraded},
+            )
 
     def stop(self, timeout: Optional[float] = None) -> None:
         """
