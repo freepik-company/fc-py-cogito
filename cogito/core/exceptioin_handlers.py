@@ -6,6 +6,7 @@ from fastapi.encoders import jsonable_encoder
 from cogito.core.exceptions import (
     BadRequestError,
     NoThreadsAvailableError,
+    PredictorOutOfMemoryError,
     WorkerTimeoutError,
     WorkerUnavailableError,
 )
@@ -64,5 +65,14 @@ async def worker_unavailable_exception_handler(
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content=jsonable_encoder({"detail": str(exc)}),
+    )
+
+
+async def predictor_out_of_memory_exception_handler(
+    request: Request, exc: PredictorOutOfMemoryError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content=jsonable_encoder({"detail": str(exc)}),
     )

@@ -22,6 +22,7 @@ from cogito.api.responses import (
 from cogito.core.config import ConfigFile
 from cogito.core.exceptioin_handlers import (
     bad_request_exception_handler,
+    predictor_out_of_memory_exception_handler,
     too_many_requests_exception_handler,
     validation_exception_handler,
     worker_timeout_exception_handler,
@@ -31,6 +32,7 @@ from cogito.core.exceptions import (
     BadRequestError,
     ConfigFileNotFoundError,
     NoThreadsAvailableError,
+    PredictorOutOfMemoryError,
     SetupError,
     WorkerTimeoutError,
     WorkerUnavailableError,
@@ -166,6 +168,9 @@ class Application:
         )
         self.app.add_exception_handler(
             WorkerUnavailableError, worker_unavailable_exception_handler
+        )
+        self.app.add_exception_handler(
+            PredictorOutOfMemoryError, predictor_out_of_memory_exception_handler
         )
 
     def _set_default_routes(self) -> None:

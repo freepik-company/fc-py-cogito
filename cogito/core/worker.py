@@ -36,6 +36,7 @@ from pydantic import BaseModel
 
 from cogito.core.exceptions import (
     BadRequestError,
+    PredictorOutOfMemoryError,
     WorkerPredictionError,
     WorkerStartError,
     WorkerTimeoutError,
@@ -49,8 +50,10 @@ from cogito.gpu import (
     MPS_PINNED_DEVICE_MEM_LIMIT_ENV,
     MPS_PIPE_DIRECTORY_ENV,
     apply_memory_limit,
+    describe_memory_cap,
     format_active_thread_percentage,
     format_pinned_device_mem_limit,
+    is_cuda_out_of_memory,
     mps_running,
 )
 
@@ -83,6 +86,8 @@ def _qualified_name(cls: type) -> str:
 # error_type is the qualified name of the exception class, so an unrelated
 # exception that happens to be called BadRequestError is not taken for cogito's.
 BAD_REQUEST_ERROR_TYPE = _qualified_name(BadRequestError)
+# A CUDA out-of-memory error, whatever its class: see cogito.gpu.is_cuda_out_of_memory.
+OUT_OF_MEMORY_ERROR_TYPE = _qualified_name(PredictorOutOfMemoryError)
 
 _logger = logging.getLogger(__name__)
 
@@ -281,7 +286,7 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
             event_loop.run(_setup_on_loop(predictor))
         else:
             predictor.setup()
-    except BaseException:
+    except BaseException as e:
         try:
             conn.send(
                 {
@@ -289,6 +294,7 @@ def _worker_main(spec: WorkerSpec, env: Dict[str, str], conn: Connection) -> Non
                     "stage": stage,
                     "pid": os.getpid(),
                     "error": traceback.format_exc(),
+                    "out_of_memory": is_cuda_out_of_memory(e),
                 }
             )
         except OSError:
@@ -494,6 +500,12 @@ async def _capture(coroutine) -> Tuple[bool, Any]:
 
 def _error_response(request_id: str, error: BaseException) -> Dict[str, Any]:
     is_bad_request = isinstance(error, BadRequestError)
+    if is_bad_request:
+        error_type = BAD_REQUEST_ERROR_TYPE
+    elif is_cuda_out_of_memory(error):
+        error_type = OUT_OF_MEMORY_ERROR_TYPE
+    else:
+        error_type = _qualified_name(type(error))
     try:
         message = (getattr(error, "message", None) if is_bad_request else None) or str(
             error
@@ -504,9 +516,7 @@ def _error_response(request_id: str, error: BaseException) -> Dict[str, Any]:
         "type": RESULT_MESSAGE,
         "id": request_id,
         "status": "error",
-        "error_type": (
-            BAD_REQUEST_ERROR_TYPE if is_bad_request else _qualified_name(type(error))
-        ),
+        "error_type": error_type,
         "message": message,
         "traceback": traceback.format_exc(),
     }
@@ -680,8 +690,10 @@ class PredictorWorker:
         Run a prediction in the worker and return its result as plain data.
 
         Raises WorkerTimeoutError if no response arrives within timeout seconds,
-        BadRequestError if the predictor rejected the input, WorkerPredictionError
-        if it failed, and WorkerUnavailableError if the worker is gone.
+        BadRequestError if the predictor rejected the input,
+        PredictorOutOfMemoryError (a WorkerPredictionError) if it ran out of GPU
+        memory, WorkerPredictionError if it failed otherwise, and
+        WorkerUnavailableError if the worker is gone.
         """
         name = self.spec.name
         if isinstance(inputs, BaseModel):
@@ -740,6 +752,13 @@ class PredictorWorker:
             return response["result"]
         if response["error_type"] == BAD_REQUEST_ERROR_TYPE:
             raise BadRequestError(response["message"])
+        if response["error_type"] == OUT_OF_MEMORY_ERROR_TYPE:
+            raise PredictorOutOfMemoryError(
+                name,
+                self.spec.gpu_memory_limit,
+                response["message"],
+                response["traceback"],
+            )
         raise WorkerPredictionError(name, response["message"], response["traceback"])
 
     def _send(self, message: Any) -> None:
@@ -1029,6 +1048,11 @@ def _spawn(
         _reap(process, timeout=10.0)
         parent_conn.close()
         error = handshake.get("error", "unknown error")
+        if handshake.get("out_of_memory"):
+            error = (
+                f"out of GPU memory ({describe_memory_cap(spec.gpu_memory_limit)}): "
+                f"{error}"
+            )
         if handshake.get("stage") == "setup":
             # Logged here, in the gateway: the worker's own logging is not set up.
             _logger.error(

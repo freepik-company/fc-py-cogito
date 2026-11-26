@@ -19,11 +19,13 @@ from pydantic import BaseModel
 from cogito.api.handlers import create_health_check_handler
 
 from cogito.core.exceptioin_handlers import (
+    predictor_out_of_memory_exception_handler,
     worker_timeout_exception_handler,
     worker_unavailable_exception_handler,
 )
 from cogito.core.exceptions import (
     BadRequestError,
+    PredictorOutOfMemoryError,
     WorkerPredictionError,
     WorkerStartError,
     WorkerTimeoutError,
@@ -895,6 +897,20 @@ IPC_PREDICTORS = {
             def predict(self) -> dict:
                 return {"score": Score(0.5), "label": Label("cat"), "scores": [Score(1)]}
     """,
+    "cogito_oom_predictor": """
+        # Stands in for torch.cuda.OutOfMemoryError, without torch.
+        OutOfMemoryError = type("OutOfMemoryError", (RuntimeError,), {"__module__": "torch.cuda"})
+
+
+        class Predictor:
+            def setup(self):
+                pass
+
+            def predict(self, kind: str):
+                if kind == "torch":
+                    raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+                raise RuntimeError("CUDA error: out of memory")
+    """,
     "cogito_exiting_predictor": """
         import os
 
@@ -1015,6 +1031,48 @@ def test_predictor_failure_raises_with_the_worker_traceback(
     assert error.value.message == "model exploded"
     assert "RuntimeError: model exploded" in error.value.traceback
     assert worker.is_alive()
+
+
+@pytest.mark.parametrize("kind", ["torch", "runtime"])
+def test_out_of_memory_names_the_predictor_and_its_cap(
+    ipc_predictors_path, workers, kind
+):
+    worker = start(
+        workers, "sdxl", "cogito_oom_predictor", gpu_memory_limit=4096 * 1024**2
+    )
+
+    with pytest.raises(PredictorOutOfMemoryError) as error:
+        asyncio.run(worker.predict({"kind": kind}))
+
+    # Still a prediction error, for whoever already catches those.
+    assert isinstance(error.value, WorkerPredictionError)
+    assert error.value.predictor == "sdxl"
+    assert error.value.gpu_memory_limit == 4096 * 1024**2
+    assert str(error.value).startswith(
+        "Predictor sdxl ran out of GPU memory (cap: 4096MB per device): "
+    )
+    assert "out of memory" in error.value.traceback
+    assert worker.is_alive()
+
+
+def test_out_of_memory_surfaces_as_500_naming_the_predictor(
+    ipc_predictors_path, workers
+):
+    worker = start(workers, "sdxl", "cogito_oom_predictor")
+
+    async def run():
+        try:
+            await worker.predict({"kind": "runtime"})
+        except PredictorOutOfMemoryError as error:
+            return await predictor_out_of_memory_exception_handler(None, error)
+
+    response = asyncio.run(run())
+
+    assert response.status_code == 500
+    assert json.loads(response.body) == {
+        "detail": "Predictor sdxl ran out of GPU memory (no GPU memory cap set): "
+        "CUDA error: out of memory"
+    }
 
 
 def test_async_predictor_runs_in_the_worker(ipc_predictors_path, workers):
@@ -2885,6 +2943,14 @@ SETUP_PREDICTORS = {
             def predict(self) -> str:
                 return "unreachable"
     """,
+    "cogito_oom_setup_predictor": """
+        class Predictor:
+            def setup(self):
+                raise RuntimeError("CUDA out of memory. Tried to allocate 8.00 GiB")
+
+            def predict(self) -> str:
+                return "unreachable"
+    """,
     # setup() fails while the file at COGITO_TEST_MARKER exists.
     "cogito_flaky_setup_predictor": """
         import os
@@ -3097,3 +3163,21 @@ def test_a_setup_failure_on_restart_is_logged_and_retried(
     wait_until(lambda: worker.is_available())
     assert worker.pid != first_pid
     assert asyncio.run(worker.predict({})) == worker.pid
+
+
+def test_out_of_memory_in_setup_names_the_predictor_and_its_cap(setup_path):
+    with pytest.raises(WorkerStartError) as error:
+        spawn_worker(
+            WorkerSpec(
+                name="flux",
+                class_path="cogito_oom_setup_predictor:Predictor",
+                gpu_memory_limit=1024**3,
+            ),
+            start_timeout=60.0,
+        )
+
+    assert error.value.predictor == "flux"
+    assert error.value.detail.startswith(
+        "setup() failed: out of GPU memory (cap: 1024MB per device): "
+    )
+    assert "CUDA out of memory" in error.value.detail

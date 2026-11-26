@@ -1126,6 +1126,7 @@ This section documents the core classes and methods available in the Cogito SDK 
   - [get_version Function](#get_version-function)
 - [GPU Module](#gpu-module)
   - [GPU Memory Limit](#gpu-memory-limit)
+  - [Degraded Mode and Out-of-Memory Errors](#degraded-mode-and-out-of-memory-errors)
 
 ### Prediction Module
 
@@ -1313,3 +1314,14 @@ Other frameworks have their own setting, passed through `WorkerSpec.env`. For ex
 A worker gets its share of each visible GPU's streaming multiprocessors from `WorkerSpec.gpu_compute`, a fraction in `(0, 1]`. With CUDA MPS, cogito starts the worker with `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` set to that share as a whole percentage, rounded half up and never below 1 (e.g. `0.25` → `25`). Without MPS nothing enforces it, and the variable is not set.
 
 `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` applies to Volta and newer GPUs, and can only lower the default set by the MPS control daemon, never raise it. It is not set for a worker that hides every GPU (`CUDA_VISIBLE_DEVICES=""`), and a value in `WorkerSpec.env` is kept as is.
+
+#### Degraded Mode and Out-of-Memory Errors
+
+When a worker has a memory cap or a compute share but no CUDA MPS daemon serves it (not detected, or `WorkerSpec.mps=False`), its limits are only partly enforced: the compute share not at all, the memory cap only in PyTorch's allocator. `WorkerSupervisor.start()` then logs a single warning, `GPU limits are not enforced: CUDA MPS is not running (degraded mode)`, whose `predictors` field names each affected predictor and what is not enforced. Restarts do not repeat it. Workers that hide every GPU are left out.
+
+A CUDA out-of-memory error in a worker (any torch `OutOfMemoryError`, or an error whose message is `CUDA out of memory` or `CUDA error: out of memory`, as when the MPS cap stops an allocation outside PyTorch) names the predictor and its cap:
+
+- In `predict()`, the gateway raises `PredictorOutOfMemoryError`, a `WorkerPredictionError` with `gpu_memory_limit`, e.g. `Predictor sdxl ran out of GPU memory (cap: 4096MB per device): CUDA out of memory. …`. The application answers it with a 500 and that message as `detail`.
+- While loading or in `setup()`, the `WorkerStartError` detail reads `out of GPU memory (cap: 4096MB per device): <traceback>`.
+
+`cogito.gpu.is_cuda_out_of_memory()` makes that check without importing torch.
