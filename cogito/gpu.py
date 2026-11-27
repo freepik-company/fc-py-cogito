@@ -26,14 +26,20 @@ mps_running() tells whether an MPS control daemon is reachable from this process
 is_cuda_out_of_memory() tells whether an exception is a CUDA out-of-memory error, so
 the worker can report it as such, naming the predictor and its cap.
 
+gpu_inventory() lists the GPUs this process may use (index, UUID, name, total
+memory) through NVML, with the pynvml module of the optional cogito[gpu] extra
+(nvidia-ml-py). Without it, or without an NVIDIA driver, the inventory is empty:
+the host is CPU-only.
+
 cogito never depends on torch: without it apply_memory_limit() does nothing.
 """
 
 import logging
 import os
 import stat
+from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Optional
+from typing import List, Optional, Tuple
 
 # Cap in bytes per visible device, read by apply_memory_limit() in the worker.
 GPU_MEMORY_LIMIT_ENV = "COGITO_GPU_MEMORY_LIMIT"
@@ -194,3 +200,117 @@ def apply_memory_limit(limit_bytes: Optional[int] = None) -> bool:
         )
         return False
     return True
+
+
+@dataclass(frozen=True)
+class GPUDevice:
+    """
+    A GPU as NVML reports it.
+
+    index is the NVML index, which follows PCI bus order: the CUDA ordinal of the
+    device under CUDA_DEVICE_ORDER=PCI_BUS_ID, which every worker is given, so it
+    can be written as is into a worker's CUDA_VISIBLE_DEVICES. total_memory is in
+    bytes.
+    """
+
+    index: int
+    uuid: str
+    name: str
+    total_memory: int
+
+
+@dataclass(frozen=True)
+class GPUInventory:
+    """
+    The GPUs a process may use, in CUDA_VISIBLE_DEVICES order; empty on a CPU-only
+    host.
+    """
+
+    devices: Tuple[GPUDevice, ...] = ()
+
+
+def _text(value) -> str:
+    # Older NVML bindings return bytes for strings.
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
+def _select_visible(
+    devices: List[GPUDevice], cuda_visible_devices: Optional[str]
+) -> Tuple[GPUDevice, ...]:
+    """
+    The devices named by cuda_visible_devices, in its order.
+
+    None means every device and "" none. As CUDA does, the list is read up to its
+    first invalid entry: an empty one, a negative index, an index or UUID prefix
+    that names no device. An entry naming more than one device (an ambiguous UUID
+    prefix) or a device already listed also ends it: CUDA does not document these,
+    so the inventory never counts a device twice nor guesses which one is meant.
+    Integer entries are NVML indices, which are CUDA ordinals only under
+    CUDA_DEVICE_ORDER=PCI_BUS_ID.
+    """
+    if cuda_visible_devices is None:
+        return tuple(devices)
+    visible: List[GPUDevice] = []
+    for entry in cuda_visible_devices.split(","):
+        entry = entry.strip()
+        if not entry or entry.startswith("-"):
+            break
+        if entry.isdigit():
+            matches = [device for device in devices if device.index == int(entry)]
+        else:
+            matches = [device for device in devices if device.uuid.startswith(entry)]
+        if len(matches) != 1 or matches[0] in visible:
+            break
+        visible.append(matches[0])
+    return tuple(visible)
+
+
+def gpu_inventory(cuda_visible_devices: Optional[str] = None) -> GPUInventory:
+    """
+    The GPUs this process may use, read through NVML.
+
+    cuda_visible_devices defaults to CUDA_VISIBLE_DEVICES; NVML ignores it, so the
+    devices are filtered here as described in _select_visible().
+    It never raises: without the pynvml module (the cogito[gpu] extra), without an
+    NVIDIA driver or on any NVML error the inventory is empty, as on a CPU-only
+    host.
+    """
+    if cuda_visible_devices is None:
+        cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    try:
+        import pynvml
+    except ImportError:
+        _logger.debug("pynvml is not installed: no GPU inventory")
+        return GPUInventory()
+    except Exception:
+        _logger.warning("Unable to import pynvml", exc_info=True)
+        return GPUInventory()
+
+    try:
+        pynvml.nvmlInit()
+    except Exception as error:
+        _logger.info("NVML is not available, no GPU inventory: %s", error)
+        return GPUInventory()
+    try:
+        devices = []
+        for index in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+            devices.append(
+                GPUDevice(
+                    index=index,
+                    uuid=_text(pynvml.nvmlDeviceGetUUID(handle)),
+                    name=_text(pynvml.nvmlDeviceGetName(handle)),
+                    total_memory=int(pynvml.nvmlDeviceGetMemoryInfo(handle).total),
+                )
+            )
+    except Exception:
+        _logger.warning("Unable to read the GPU inventory from NVML", exc_info=True)
+        return GPUInventory()
+    finally:
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            _logger.debug("nvmlShutdown failed", exc_info=True)
+    return GPUInventory(devices=_select_visible(devices, cuda_visible_devices))

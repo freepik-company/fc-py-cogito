@@ -10,10 +10,13 @@ import pytest
 from cogito import gpu
 from cogito.gpu import (
     GPU_MEMORY_LIMIT_ENV,
+    GPUDevice,
+    GPUInventory,
     apply_memory_limit,
     describe_memory_cap,
     format_active_thread_percentage,
     format_pinned_device_mem_limit,
+    gpu_inventory,
     is_cuda_out_of_memory,
     mps_running,
 )
@@ -288,3 +291,156 @@ def test_is_cuda_out_of_memory_never_raises(raised):
 def test_describe_memory_cap():
     assert describe_memory_cap(1536 * 1024**2 + 1) == "cap: 1536MB per device"
     assert describe_memory_cap(None) == "no GPU memory cap set"
+
+
+class FakeNvml(types.ModuleType):
+    """A fake pynvml module serving the given (uuid, name, total memory) devices."""
+
+    def __init__(self, devices, init_error=None, query_error=None, as_bytes=False):
+        super().__init__("pynvml")
+        self.devices = devices
+        self.init_error = init_error
+        self.query_error = query_error
+        self.as_bytes = as_bytes
+        self.shutdowns = 0
+
+    def nvmlInit(self):
+        if self.init_error:
+            raise self.init_error
+
+    def nvmlShutdown(self):
+        self.shutdowns += 1
+
+    def nvmlDeviceGetCount(self):
+        return len(self.devices)
+
+    def nvmlDeviceGetHandleByIndex(self, index):
+        if self.query_error:
+            raise self.query_error
+        return index
+
+    def _string(self, value):
+        return value.encode() if self.as_bytes else value
+
+    def nvmlDeviceGetUUID(self, handle):
+        return self._string(self.devices[handle][0])
+
+    def nvmlDeviceGetName(self, handle):
+        return self._string(self.devices[handle][1])
+
+    def nvmlDeviceGetMemoryInfo(self, handle):
+        return types.SimpleNamespace(total=self.devices[handle][2])
+
+
+THREE_GPUS = [
+    ("GPU-aaaa-0000", "NVIDIA A100-SXM4-80GB", 80 * GB),
+    ("GPU-bbbb-1111", "NVIDIA A100-SXM4-80GB", 80 * GB),
+    ("GPU-bbbc-2222", "NVIDIA L4", 24 * GB),
+]
+
+
+@pytest.fixture
+def fake_nvml(monkeypatch):
+    """Install a fake pynvml module and unset CUDA_VISIBLE_DEVICES."""
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def install(devices=THREE_GPUS, **kwargs):
+        nvml = FakeNvml(devices, **kwargs)
+        monkeypatch.setitem(sys.modules, "pynvml", nvml)
+        return nvml
+
+    return install
+
+
+def _indices(inventory):
+    return [device.index for device in inventory.devices]
+
+
+def test_gpu_inventory_lists_every_device(fake_nvml):
+    nvml = fake_nvml()
+
+    inventory = gpu_inventory()
+
+    assert inventory == GPUInventory(
+        devices=(
+            GPUDevice(0, "GPU-aaaa-0000", "NVIDIA A100-SXM4-80GB", 80 * GB),
+            GPUDevice(1, "GPU-bbbb-1111", "NVIDIA A100-SXM4-80GB", 80 * GB),
+            GPUDevice(2, "GPU-bbbc-2222", "NVIDIA L4", 24 * GB),
+        )
+    )
+    assert nvml.shutdowns == 1
+
+
+def test_gpu_inventory_decodes_bytes_from_older_bindings(fake_nvml):
+    fake_nvml(as_bytes=True)
+
+    device = gpu_inventory().devices[0]
+
+    assert (device.uuid, device.name) == ("GPU-aaaa-0000", "NVIDIA A100-SXM4-80GB")
+
+
+def test_gpu_inventory_follows_cuda_visible_devices_from_env(fake_nvml, monkeypatch):
+    fake_nvml()
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2,0")
+
+    assert _indices(gpu_inventory()) == [2, 0]
+
+
+def test_gpu_inventory_argument_overrides_env(fake_nvml, monkeypatch):
+    fake_nvml()
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "2")
+
+    assert _indices(gpu_inventory("1")) == [1]
+
+
+def test_gpu_inventory_is_empty_when_every_gpu_is_hidden(fake_nvml, monkeypatch):
+    fake_nvml()
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+
+    assert gpu_inventory() == GPUInventory()
+
+
+@pytest.mark.parametrize(
+    "devices, expected",
+    [
+        ("GPU-bbbc-2222", [2]),
+        ("GPU-aaaa, 1", [0, 1]),
+        # CUDA stops at the first invalid entry.
+        ("0,,1", [0]),
+        ("0,-1,2", [0]),
+        ("0,7,1", [0]),
+        ("0,GPU-ffff,1", [0]),
+        # Not documented by CUDA: never guess, never count a device twice.
+        ("0,GPU-bbb,2", [0]),
+        ("1,1,2", [1]),
+        ("1,GPU-bbbb-1111,2", [1]),
+    ],
+)
+def test_gpu_inventory_reads_cuda_visible_devices_like_cuda(
+    fake_nvml, devices, expected
+):
+    fake_nvml()
+
+    assert _indices(gpu_inventory(devices)) == expected
+
+
+def test_gpu_inventory_is_empty_without_pynvml(monkeypatch):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    # A None entry makes "import pynvml" raise ImportError.
+    monkeypatch.setitem(sys.modules, "pynvml", None)
+
+    assert gpu_inventory() == GPUInventory()
+
+
+def test_gpu_inventory_is_empty_when_nvml_is_unavailable(fake_nvml):
+    nvml = fake_nvml(init_error=RuntimeError("NVML Shared Library Not Found"))
+
+    assert gpu_inventory() == GPUInventory()
+    assert nvml.shutdowns == 0
+
+
+def test_gpu_inventory_is_empty_and_shuts_nvml_down_when_a_query_fails(fake_nvml):
+    nvml = fake_nvml(query_error=RuntimeError("GPU is lost"))
+
+    assert gpu_inventory() == GPUInventory()
+    assert nvml.shutdowns == 1
