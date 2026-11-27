@@ -96,7 +96,6 @@ class Application:
             title=self.config.cogito.get_server_name,
             version=self.config.cogito.get_server_version,
             description=self.config.cogito.get_server_description,
-            access_log=self.config.cogito.get_fastapi_access_log,
             debug=self.config.cogito.get_fastapi_debug,
             lifespan=lifespan,
         )
