@@ -18,7 +18,9 @@ does and checks:
   after the predictor lifts PyTorch's own cap (driver-level, hard); without MPS
   it does not (PyTorch only, soft).
 - compute (MPS only): a worker given a 0.25 compute share is clearly slower at a
-  matmul than one given the whole GPU.
+  matmul than one given the whole GPU: the median of interleaved measurements is
+  at most 0.75 of it. Not 0.25: with fewer SMs active, a power- or clock-bound
+  GPU runs each faster (an L4 measured 0.45).
 - degraded mode: without MPS, cogito logs its degraded-mode warning once.
 
 It prints a JSON report and exits 1 if any check fails.
@@ -32,6 +34,7 @@ import json
 import logging
 import os
 import platform
+import statistics
 import subprocess
 import sys
 import time
@@ -39,6 +42,9 @@ import time
 # This file is also the module of the probe predictor the workers load.
 PROBE = f"{os.path.splitext(os.path.basename(__file__))[0]}:Probe"
 MB = 1024 * 1024
+COMPUTE_SAMPLES = 5
+# A 0.25 share must leave the worker clearly slower than the whole GPU.
+COMPUTE_RATIO_THRESHOLD = 0.75
 ENV_KEYS = (
     "CUDA_VISIBLE_DEVICES",
     "COGITO_GPU_MEMORY_LIMIT",
@@ -53,7 +59,14 @@ class Probe:
 
         torch.cuda.init()
 
-    def predict(self, action: str, mb: int = 0, size: int = 8192, runs: int = 20):
+    def predict(
+        self,
+        action: str,
+        mb: int = 0,
+        size: int = 8192,
+        runs: int = 20,
+        warmup: int = 5,
+    ):
         import torch
 
         if action == "env":
@@ -74,7 +87,8 @@ class Probe:
         if action == "matmul":
             a = torch.randn(size, size, device="cuda", dtype=torch.float16)
             b = torch.randn(size, size, device="cuda", dtype=torch.float16)
-            torch.matmul(a, b)
+            for _ in range(warmup):
+                torch.matmul(a, b)
             torch.cuda.synchronize()
             start = time.perf_counter()
             for _ in range(runs):
@@ -171,6 +185,18 @@ def check_memory(mps, cap_mb):
     }
 
 
+def compare_throughput(quarter, full, threshold=COMPUTE_RATIO_THRESHOLD):
+    """
+    Compare the TFLOPS samples of the 0.25 and the whole-GPU workers by their
+    medians. The ratio is None when either worker has no sample.
+    """
+    result = {"quarter": quarter, "full": full, "threshold": threshold}
+    if not quarter or not full:
+        return {**result, "ratio": None, "passed": False}
+    ratio = round(statistics.median(quarter) / statistics.median(full), 2)
+    return {**result, "ratio": ratio, "passed": ratio <= threshold}
+
+
 def check_compute():
     from cogito.core.worker import WorkerSpec, WorkerSupervisor
 
@@ -186,17 +212,25 @@ def check_compute():
         quarter_env = _predict(quarter, action="env")
         full_env = _predict(full, action="env")
         # One at a time: the share caps a worker even when it has the GPU alone.
-        quarter_speed = _predict(quarter, action="matmul")
-        full_speed = _predict(full, action="matmul")
+        # Interleaved, so a change in clocks or temperature hits both workers.
+        samples = {"quarter": [], "full": []}
+        errors = []
+        for _ in range(COMPUTE_SAMPLES):
+            for name, worker in (("quarter", quarter), ("full", full)):
+                speed = _predict(worker, action="matmul")
+                if "tflops" in speed:
+                    samples[name].append(speed["tflops"])
+                else:
+                    errors.append({name: speed})
     finally:
         supervisor.stop()
 
-    ratio = None
-    if "tflops" in quarter_speed and "tflops" in full_speed:
-        ratio = round(quarter_speed["tflops"] / full_speed["tflops"], 2)
+    throughput = compare_throughput(samples["quarter"], samples["full"])
+    if errors:
+        throughput = {**throughput, "ratio": None, "passed": False, "errors": errors}
     return {
         "env": {"quarter": quarter_env, "full": full_env},
-        "results": {"quarter": quarter_speed, "full": full_speed, "ratio": ratio},
+        "results": throughput,
         "checks": {
             "active thread percentage 25 for 0.25": quarter_env.get(
                 "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"
@@ -206,7 +240,9 @@ def check_compute():
                 "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"
             )
             == "100",
-            "0.25 share is at most half as fast": ratio is not None and ratio <= 0.5,
+            f"0.25 share is at most {COMPUTE_RATIO_THRESHOLD} as fast (medians)": (
+                throughput["passed"]
+            ),
         },
     }
 
