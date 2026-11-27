@@ -296,11 +296,20 @@ def test_describe_memory_cap():
 class FakeNvml(types.ModuleType):
     """A fake pynvml module serving the given (uuid, name, total memory) devices."""
 
-    def __init__(self, devices, init_error=None, query_error=None, as_bytes=False):
+    def __init__(
+        self,
+        devices,
+        init_error=None,
+        count_error=None,
+        failing=(),
+        as_bytes=False,
+    ):
         super().__init__("pynvml")
         self.devices = devices
         self.init_error = init_error
-        self.query_error = query_error
+        self.count_error = count_error
+        # Indices whose handle cannot be read, e.g. NVML_ERROR_NO_PERMISSION.
+        self.failing = failing
         self.as_bytes = as_bytes
         self.shutdowns = 0
 
@@ -312,11 +321,13 @@ class FakeNvml(types.ModuleType):
         self.shutdowns += 1
 
     def nvmlDeviceGetCount(self):
+        if self.count_error:
+            raise self.count_error
         return len(self.devices)
 
     def nvmlDeviceGetHandleByIndex(self, index):
-        if self.query_error:
-            raise self.query_error
+        if index in self.failing:
+            raise RuntimeError("Insufficient Permissions")
         return index
 
     def _string(self, value):
@@ -341,8 +352,12 @@ THREE_GPUS = [
 
 @pytest.fixture
 def fake_nvml(monkeypatch):
-    """Install a fake pynvml module and unset CUDA_VISIBLE_DEVICES."""
+    """
+    Install a fake pynvml module, unset CUDA_VISIBLE_DEVICES and order CUDA devices
+    by PCI bus, as workers are.
+    """
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
     def install(devices=THREE_GPUS, **kwargs):
         nvml = FakeNvml(devices, **kwargs)
@@ -414,6 +429,11 @@ def test_gpu_inventory_is_empty_when_every_gpu_is_hidden(fake_nvml, monkeypatch)
         ("0,GPU-bbb,2", [0]),
         ("1,1,2", [1]),
         ("1,GPU-bbbb-1111,2", [1]),
+        # MIG instances are not listed.
+        ("0,MIG-GPU-aaaa-0000/1/0,1", [0]),
+        # Only ASCII digits make an index.
+        ("0,\u00b2,1", [0]),
+        ("0,\u0663,1", [0]),
     ],
 )
 def test_gpu_inventory_reads_cuda_visible_devices_like_cuda(
@@ -439,8 +459,53 @@ def test_gpu_inventory_is_empty_when_nvml_is_unavailable(fake_nvml):
     assert nvml.shutdowns == 0
 
 
-def test_gpu_inventory_is_empty_and_shuts_nvml_down_when_a_query_fails(fake_nvml):
-    nvml = fake_nvml(query_error=RuntimeError("GPU is lost"))
+def test_gpu_inventory_is_empty_and_shuts_nvml_down_when_counting_fails(fake_nvml):
+    nvml = fake_nvml(count_error=RuntimeError("Unknown Error"))
 
     assert gpu_inventory() == GPUInventory()
     assert nvml.shutdowns == 1
+
+
+def test_gpu_inventory_leaves_out_only_a_gpu_nvml_cannot_read(fake_nvml, caplog):
+    nvml = fake_nvml(failing={1})
+
+    with caplog.at_level(logging.WARNING, logger="cogito.gpu"):
+        inventory = gpu_inventory()
+
+    assert _indices(inventory) == [0, 2]
+    assert "Leaving GPU 1 out of the inventory" in caplog.text
+    assert nvml.shutdowns == 1
+
+
+def test_gpu_inventory_logs_the_entry_that_ends_the_list(fake_nvml, caplog):
+    fake_nvml()
+
+    with caplog.at_level(logging.WARNING, logger="cogito.gpu"):
+        gpu_inventory("0,GPU-ffff,1")
+
+    assert "'GPU-ffff'" in caplog.text
+    assert "GPU-ffff,1" in caplog.text
+
+
+@pytest.mark.parametrize("devices", ["0,-1,1", "0,,1", "0,1"])
+def test_gpu_inventory_does_not_log_a_list_cuda_reads_the_same_way(
+    fake_nvml, caplog, devices
+):
+    fake_nvml()
+
+    with caplog.at_level(logging.WARNING, logger="cogito.gpu"):
+        gpu_inventory(devices)
+
+    assert caplog.text == ""
+
+
+def test_gpu_inventory_warns_about_indices_without_pci_bus_order(
+    fake_nvml, monkeypatch, caplog
+):
+    fake_nvml()
+    monkeypatch.delenv("CUDA_DEVICE_ORDER")
+
+    with caplog.at_level(logging.WARNING, logger="cogito.gpu"):
+        assert _indices(gpu_inventory("1")) == [1]
+
+    assert "CUDA_DEVICE_ORDER is not PCI_BUS_ID" in caplog.text

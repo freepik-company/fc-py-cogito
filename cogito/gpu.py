@@ -36,6 +36,7 @@ cogito never depends on torch: without it apply_memory_limit() does nothing.
 
 import logging
 import os
+import re
 import stat
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
@@ -229,6 +230,11 @@ class GPUInventory:
     devices: Tuple[GPUDevice, ...] = ()
 
 
+# An index in CUDA_VISIBLE_DEVICES: str.isdigit() would also accept other
+# Unicode digits, which CUDA does not read as one.
+_ASCII_INDEX = re.compile(r"[0-9]+")
+
+
 def _text(value) -> str:
     # Older NVML bindings return bytes for strings.
     if isinstance(value, bytes):
@@ -247,21 +253,39 @@ def _select_visible(
     that names no device. An entry naming more than one device (an ambiguous UUID
     prefix) or a device already listed also ends it: CUDA does not document these,
     so the inventory never counts a device twice nor guesses which one is meant.
-    Integer entries are NVML indices, which are CUDA ordinals only under
-    CUDA_DEVICE_ORDER=PCI_BUS_ID.
+    MIG instances (MIG-...) are not listed, so a MIG entry ends the list too.
+    Only ASCII digits make an index. Integer entries are NVML indices, which are
+    CUDA ordinals only under CUDA_DEVICE_ORDER=PCI_BUS_ID: a warning is logged
+    when this process runs with another order.
+    An entry that ends the list, other than an empty one or a negative index, is
+    logged as a warning with the entries it drops.
     """
     if cuda_visible_devices is None:
         return tuple(devices)
     visible: List[GPUDevice] = []
-    for entry in cuda_visible_devices.split(","):
-        entry = entry.strip()
+    entries = [entry.strip() for entry in cuda_visible_devices.split(",")]
+    for position, entry in enumerate(entries):
         if not entry or entry.startswith("-"):
             break
-        if entry.isdigit():
+        if _ASCII_INDEX.fullmatch(entry):
+            if os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
+                _logger.warning(
+                    "CUDA_VISIBLE_DEVICES entry %r is read as an NVML (PCI bus) "
+                    "index, but CUDA_DEVICE_ORDER is not PCI_BUS_ID: CUDA may "
+                    "number this GPU differently",
+                    entry,
+                )
             matches = [device for device in devices if device.index == int(entry)]
         else:
             matches = [device for device in devices if device.uuid.startswith(entry)]
         if len(matches) != 1 or matches[0] in visible:
+            _logger.warning(
+                "CUDA_VISIBLE_DEVICES entry %r names no single new GPU (unknown, "
+                "ambiguous, repeated or a MIG instance): it and the entries after "
+                "it are left out of the GPU inventory: %s",
+                entry,
+                ",".join(entries[position:]),
+            )
             break
         visible.append(matches[0])
     return tuple(visible)
@@ -274,8 +298,9 @@ def gpu_inventory(cuda_visible_devices: Optional[str] = None) -> GPUInventory:
     cuda_visible_devices defaults to CUDA_VISIBLE_DEVICES; NVML ignores it, so the
     devices are filtered here as described in _select_visible().
     It never raises: without the pynvml module (the cogito[gpu] extra), without an
-    NVIDIA driver or on any NVML error the inventory is empty, as on a CPU-only
-    host.
+    NVIDIA driver or when NVML cannot count the GPUs the inventory is empty, as on
+    a CPU-only host. A GPU NVML cannot read (no permission, lost) is left out and
+    logged; the others are kept.
     """
     if cuda_visible_devices is None:
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
@@ -296,15 +321,24 @@ def gpu_inventory(cuda_visible_devices: Optional[str] = None) -> GPUInventory:
     try:
         devices = []
         for index in range(pynvml.nvmlDeviceGetCount()):
-            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
-            devices.append(
-                GPUDevice(
+            # A GPU this process may not use, or that fell off the bus, fails on
+            # its own: the others are still listed, with their NVML index.
+            try:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(index)
+                device = GPUDevice(
                     index=index,
                     uuid=_text(pynvml.nvmlDeviceGetUUID(handle)),
                     name=_text(pynvml.nvmlDeviceGetName(handle)),
                     total_memory=int(pynvml.nvmlDeviceGetMemoryInfo(handle).total),
                 )
-            )
+            except Exception as error:
+                _logger.warning(
+                    "Leaving GPU %d out of the inventory: NVML cannot read it: %s",
+                    index,
+                    error,
+                )
+                continue
+            devices.append(device)
     except Exception:
         _logger.warning("Unable to read the GPU inventory from NVML", exc_info=True)
         return GPUInventory()
