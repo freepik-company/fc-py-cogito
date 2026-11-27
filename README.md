@@ -1127,6 +1127,7 @@ This section documents the core classes and methods available in the Cogito SDK 
 - [GPU Module](#gpu-module)
   - [GPU Memory Limit](#gpu-memory-limit)
   - [Degraded Mode and Out-of-Memory Errors](#degraded-mode-and-out-of-memory-errors)
+  - [Validating GPU Limits on a Real GPU](#validating-gpu-limits-on-a-real-gpu)
 
 ### Prediction Module
 
@@ -1353,3 +1354,16 @@ A CUDA out-of-memory error in a worker (any torch `OutOfMemoryError`, or an erro
 - While loading or in `setup()`, the `WorkerStartError` detail reads `out of GPU memory (cap: 4096MB per device): <traceback>`.
 
 `cogito.gpu.is_cuda_out_of_memory()` makes that check without importing torch.
+
+#### Validating GPU Limits on a Real GPU
+
+`scripts/validate_gpu_limits.py` checks these limits on a host with an NVIDIA GPU (Volta or newer), CUDA and `torch`, from a checkout with cogito installed (`pip install -e .`). Run it once without CUDA MPS and once with it:
+
+```bash
+python scripts/validate_gpu_limits.py          # degraded mode: soft memory cap, warning logged
+nvidia-cuda-mps-control -d                     # start the MPS control daemon
+python scripts/validate_gpu_limits.py          # hard memory cap and compute share
+echo quit | nvidia-cuda-mps-control            # stop it
+```
+
+It starts two workers per check and prints a JSON report: a worker capped with `--cap-mb` (2048 by default) gets a `PredictorOutOfMemoryError` beyond its cap while its uncapped sibling keeps allocating; with MPS the cap still holds after the predictor lifts PyTorch's own cap, and a worker with a `0.25` compute share is clearly slower at a matmul than one with the whole GPU: the median of 5 interleaved measurements is at most `0.75` of it. Not `0.25`, because a power- or clock-bound GPU runs fewer SMs faster (an L4 measured `0.45`). It exits with 1 if a check fails. It tests a single GPU, `--device` (an index or a UUID as `nvidia-smi` names it, `0` by default), and overrides `CUDA_VISIBLE_DEVICES` with it.

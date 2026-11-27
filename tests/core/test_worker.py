@@ -907,6 +907,8 @@ IPC_PREDICTORS = {
                 pass
 
             def predict(self, kind: str):
+                if kind == "none":
+                    return {"ok": True}
                 if kind == "torch":
                     raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
                 raise RuntimeError("CUDA error: out of memory")
@@ -1053,6 +1055,35 @@ def test_out_of_memory_names_the_predictor_and_its_cap(
     )
     assert "out of memory" in error.value.traceback
     assert worker.is_alive()
+
+
+def test_out_of_memory_is_confined_to_its_predictor(ipc_predictors_path, workers):
+    sdxl = start(
+        workers, "sdxl", "cogito_oom_predictor", gpu_memory_limit=4096 * 1024**2
+    )
+    model = start(workers, "model", "cogito_model_predictor")
+
+    async def run():
+        return await asyncio.gather(
+            sdxl.predict({"kind": "runtime"}),
+            model.predict(TextInput(text="hello")),
+            return_exceptions=True,
+        )
+
+    oom, result = asyncio.run(run())
+
+    assert isinstance(oom, PredictorOutOfMemoryError)
+    assert oom.predictor == "sdxl"
+    assert result == {"text": "HELLO", "length": 5}
+    assert sdxl.is_alive() and model.is_alive()
+    # Both keep serving after the out-of-memory error.
+    assert asyncio.run(sdxl.predict({"kind": "none"})) == {"ok": True}
+    assert asyncio.run(model.predict(TextInput(text="again"))) == {
+        "text": "AGAIN",
+        "length": 5,
+    }
+    with pytest.raises(PredictorOutOfMemoryError):
+        asyncio.run(sdxl.predict({"kind": "torch"}))
 
 
 def test_out_of_memory_surfaces_as_500_naming_the_predictor(
