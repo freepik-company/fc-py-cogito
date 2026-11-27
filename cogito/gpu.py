@@ -128,7 +128,9 @@ def is_cuda_out_of_memory(error: BaseException) -> bool:
             ):
                 return True
         message = str(error).lower()
-    except Exception:
+    except BaseException:
+        # Even a SystemExit from a broken __str__: the caller is reporting a
+        # failure already.
         return False
     return any(text in message for text in _CUDA_OUT_OF_MEMORY_MESSAGES)
 

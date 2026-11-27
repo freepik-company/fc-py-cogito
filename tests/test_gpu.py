@@ -276,10 +276,11 @@ def test_is_not_cuda_out_of_memory(error):
     assert not is_cuda_out_of_memory(error)
 
 
-def test_is_cuda_out_of_memory_never_raises():
+@pytest.mark.parametrize("raised", [RuntimeError, SystemExit, KeyboardInterrupt])
+def test_is_cuda_out_of_memory_never_raises(raised):
     class BrokenStr(Exception):
         def __str__(self):
-            raise RuntimeError("cannot render")
+            raise raised("cannot render")
 
     assert not is_cuda_out_of_memory(BrokenStr())
 

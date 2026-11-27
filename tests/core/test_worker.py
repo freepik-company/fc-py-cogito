@@ -1997,7 +1997,9 @@ def degraded_mode_warnings(caplog):
     ]
 
 
-def test_supervisor_warns_once_about_limits_mps_does_not_enforce(caplog):
+def test_supervisor_warns_once_about_limits_mps_does_not_enforce(caplog, monkeypatch):
+    # A host that hides its GPUs would leave every worker out of the warning.
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     caplog.set_level(logging.WARNING, logger="cogito.core.worker")
     supervisor = WorkerSupervisor(
         [
@@ -2054,7 +2056,10 @@ def test_no_degraded_mode_warning_when_limits_are_enforced_or_unneeded(
     assert not degraded_mode_warnings(caplog)
 
 
-def test_degraded_mode_warning_is_not_repeated_on_restart(supervision_path, caplog):
+def test_degraded_mode_warning_is_not_repeated_on_restart(
+    supervision_path, caplog, monkeypatch
+):
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
     caplog.set_level(logging.WARNING, logger="cogito.core.worker")
     supervisor = WorkerSupervisor(
         [
