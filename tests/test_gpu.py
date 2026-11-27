@@ -11,8 +11,10 @@ from cogito import gpu
 from cogito.gpu import (
     GPU_MEMORY_LIMIT_ENV,
     apply_memory_limit,
+    describe_memory_cap,
     format_active_thread_percentage,
     format_pinned_device_mem_limit,
+    is_cuda_out_of_memory,
     mps_running,
 )
 
@@ -239,3 +241,50 @@ def test_mps_running_never_raises(monkeypatch):
 )
 def test_format_active_thread_percentage(compute, percentage):
     assert format_active_thread_percentage(compute) == percentage
+
+
+def torch_error(module, name="OutOfMemoryError"):
+    """A class standing in for one of torch's, without importing torch."""
+    return type(name, (RuntimeError,), {"__module__": module})
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        torch_error("torch")("Allocation failed"),
+        torch_error("torch.cuda")("Allocation failed"),
+        type("Custom", (torch_error("torch.cuda"),), {})("Allocation failed"),
+        RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB"),
+        RuntimeError("CUDA error: out of memory\nCUDA kernel errors might be ..."),
+    ],
+)
+def test_is_cuda_out_of_memory(error):
+    assert is_cuda_out_of_memory(error)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("model exploded"),
+        MemoryError("out of memory"),
+        torch_error("not_torch")("Allocation failed"),
+        torch_error("torchvision")("Allocation failed"),
+        torch_error("torch", name="AcceleratorError")("device-side assert"),
+    ],
+)
+def test_is_not_cuda_out_of_memory(error):
+    assert not is_cuda_out_of_memory(error)
+
+
+@pytest.mark.parametrize("raised", [RuntimeError, SystemExit, KeyboardInterrupt])
+def test_is_cuda_out_of_memory_never_raises(raised):
+    class BrokenStr(Exception):
+        def __str__(self):
+            raise raised("cannot render")
+
+    assert not is_cuda_out_of_memory(BrokenStr())
+
+
+def test_describe_memory_cap():
+    assert describe_memory_cap(1536 * 1024**2 + 1) == "cap: 1536MB per device"
+    assert describe_memory_cap(None) == "no GPU memory cap set"

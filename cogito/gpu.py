@@ -23,6 +23,9 @@ CUDA_MPS_ACTIVE_THREAD_PERCENTAGE; without MPS there is no compute limit.
 
 mps_running() tells whether an MPS control daemon is reachable from this process.
 
+is_cuda_out_of_memory() tells whether an exception is a CUDA out-of-memory error, so
+the worker can report it as such, naming the predictor and its cap.
+
 cogito never depends on torch: without it apply_memory_limit() does nothing.
 """
 
@@ -103,6 +106,42 @@ def format_pinned_device_mem_limit(devices: str, limit_bytes: int) -> str:
             break
         count += 1
     return ",".join(f"{ordinal}={limit}" for ordinal in range(count))
+
+
+# Messages of a CUDA out-of-memory error: PyTorch's caching allocator, and the CUDA
+# runtime outside it (e.g. when the MPS cap stops a kernel or library allocation).
+_CUDA_OUT_OF_MEMORY_MESSAGES = ("cuda out of memory", "cuda error: out of memory")
+
+
+def is_cuda_out_of_memory(error: BaseException) -> bool:
+    """
+    Whether error is a CUDA out-of-memory error, without importing torch.
+
+    That is any torch OutOfMemoryError (torch.OutOfMemoryError,
+    torch.cuda.OutOfMemoryError) or subclass, or an error whose message is the one
+    of a CUDA out-of-memory error. It never raises.
+    """
+    try:
+        for cls in type(error).__mro__:
+            if cls.__name__ == "OutOfMemoryError" and (
+                cls.__module__ == "torch" or cls.__module__.startswith("torch.")
+            ):
+                return True
+        message = str(error).lower()
+    except BaseException:
+        # Even a SystemExit from a broken __str__: the caller is reporting a
+        # failure already.
+        return False
+    return any(text in message for text in _CUDA_OUT_OF_MEMORY_MESSAGES)
+
+
+def describe_memory_cap(limit_bytes: Optional[int]) -> str:
+    """
+    The memory cap of a worker for an error message, e.g. "cap: 1024MB per device"
+    """
+    if limit_bytes is None:
+        return "no GPU memory cap set"
+    return f"cap: {limit_bytes // MB}MB per device"
 
 
 def apply_memory_limit(limit_bytes: Optional[int] = None) -> bool:

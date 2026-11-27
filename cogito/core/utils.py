@@ -25,6 +25,7 @@ from cogito.core.exceptions import (
     ModelDownloadError,
     NoThreadsAvailableError,
     BadRequestError,
+    PredictorOutOfMemoryError,
 )
 from cogito.core.metrics import inference_duration_histogram
 from cogito.core.model_store import download_gcp_model, download_huggingface_model
@@ -120,7 +121,8 @@ def wrap_handler(
                         end_time * 1000, {"predictor": class_name, "async": True}
                     )
                     # todo Count successful requests
-                except BadRequestError as e:
+                except (BadRequestError, PredictorOutOfMemoryError):
+                    # Answered by their exception handlers.
                     raise
                 except Exception as e:
                     logging.exception("predictor handler invocation failed")
@@ -164,7 +166,8 @@ def wrap_handler(
                         end_time * 1000, {"predictor": class_name, "async": False}
                     )
                     # todo Count successful requests
-                except BadRequestError as e:
+                except (BadRequestError, PredictorOutOfMemoryError):
+                    # Answered by their exception handlers.
                     raise
                 except Exception as e:
                     logging.exception("predictor handler invocation failed")
