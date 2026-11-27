@@ -1279,7 +1279,35 @@ This allows you to programmatically check which version of Cogito is being used 
 
 ### GPU Module
 
-The GPU module (`cogito.gpu`) caps the GPU memory (VRAM) a predictor worker can allocate and its share of the GPU's compute.
+The GPU module (`cogito.gpu`) lists the GPUs of the host, and caps the GPU memory (VRAM) a predictor worker can allocate and its share of the GPU's compute.
+
+#### GPU Inventory
+
+`cogito.gpu.gpu_inventory()` lists the GPUs the process may use through NVML. It needs the optional `gpu` extra, which installs NVIDIA's NVML bindings (`nvidia-ml-py`, the `pynvml` module):
+
+```bash
+pip install "cogito[gpu]"
+```
+
+```python
+from cogito.gpu import gpu_inventory
+
+inventory = gpu_inventory()
+for device in inventory.devices:
+    print(device.index, device.uuid, device.name, device.total_memory)
+```
+
+The result is a plain dataclass, `GPUInventory`, whose `devices` is a tuple of `GPUDevice(index, uuid, name, total_memory)`. `index` is the NVML index, which follows PCI bus order, `uuid` is the one `nvidia-smi -L` shows (`GPU-…`), and `total_memory` is in bytes.
+
+It never raises. Without the `gpu` extra, without an NVIDIA driver, or when NVML cannot count the GPUs, the inventory is empty, as on a CPU-only host. A single GPU that NVML cannot read (no permission for this process, or fallen off the bus) is left out with a warning; the others are kept with their index.
+
+NVML sees every GPU of the host, so the inventory is filtered with `CUDA_VISIBLE_DEVICES`. You can pass it as an argument; by default it is read from the environment.
+
+- Unset: every GPU.
+- `""`: none.
+- Otherwise its entries, in order. An entry is an index (ASCII digits) or a UUID prefix (`GPU-8f3a`). As in CUDA, the list ends at the first invalid entry: an empty one, a negative index, or one that names no GPU. It also ends at an ambiguous UUID prefix or a GPU already listed; CUDA does not document these cases, so the inventory neither guesses nor counts a GPU twice. MIG instances (`MIG-…`) are not listed yet, so a MIG entry ends the list as well. Except for an empty entry or a negative index, the entry that ends the list is logged as a warning, together with the entries it drops.
+
+Indices are NVML indices. They are the CUDA ordinals only under `CUDA_DEVICE_ORDER=PCI_BUS_ID`, which every worker is given; give it to the gateway as well when its `CUDA_VISIBLE_DEVICES` lists indices. Without it, a warning is logged for each index read.
 
 #### CUDA MPS Detection
 
