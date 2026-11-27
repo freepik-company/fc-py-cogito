@@ -1338,4 +1338,4 @@ python scripts/validate_gpu_limits.py          # hard memory cap and compute sha
 echo quit | nvidia-cuda-mps-control            # stop it
 ```
 
-It starts two workers per check and prints a JSON report: a worker capped with `--cap-mb` (2048 by default) gets a `PredictorOutOfMemoryError` beyond its cap while its uncapped sibling keeps allocating; with MPS the cap still holds after the predictor lifts PyTorch's own cap, and a worker with a `0.25` compute share is at most half as fast at a matmul as one with the whole GPU. It exits with 1 if a check fails.
+It starts two workers per check and prints a JSON report: a worker capped with `--cap-mb` (2048 by default) gets a `PredictorOutOfMemoryError` beyond its cap while its uncapped sibling keeps allocating; with MPS the cap still holds after the predictor lifts PyTorch's own cap, and a worker with a `0.25` compute share is at most half as fast at a matmul as one with the whole GPU. It exits with 1 if a check fails. It tests a single GPU, `--device` (an index or a UUID as `nvidia-smi` names it, `0` by default), and overrides `CUDA_VISIBLE_DEVICES` with it.

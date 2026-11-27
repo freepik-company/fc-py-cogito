@@ -9,7 +9,9 @@ from a checkout with cogito installed (pip install -e .):
     python scripts/validate_gpu_limits.py              # with CUDA MPS
     echo quit | nvidia-cuda-mps-control                # stop it
 
-It detects MPS the way cogito does and checks:
+It runs on a single GPU, --device (an index or a UUID, as nvidia-smi names it;
+0 by default), whatever CUDA_VISIBLE_DEVICES was. It detects MPS the way cogito
+does and checks:
 
 - memory: a worker capped at --cap-mb fails with PredictorOutOfMemoryError beyond
   its cap while an uncapped sibling keeps allocating. With MPS the cap holds even
@@ -24,6 +26,8 @@ It prints a JSON report and exits 1 if any check fails.
 
 import argparse
 import asyncio
+import csv
+import io
 import json
 import logging
 import os
@@ -119,9 +123,10 @@ def check_memory(mps, cap_mb):
         env = _predict(capped, action="env")
         within = _predict(capped, action="alloc", mb=cap_mb // 2)
         beyond = _predict(capped, action="alloc", mb=cap_mb + cap_mb // 2)
+        # With its cap still in place: unbounded_alloc lifts PyTorch's.
+        after = _predict(capped, action="alloc", mb=cap_mb // 2)
         sibling_beyond = _predict(sibling, action="alloc", mb=cap_mb + cap_mb // 2)
         unbounded = _predict(capped, action="unbounded_alloc", mb=cap_mb + cap_mb // 2)
-        after = _predict(capped, action="alloc", mb=cap_mb // 2)
         alive = capped.is_available() and sibling.is_available()
     finally:
         supervisor.stop()
@@ -206,30 +211,32 @@ def check_compute():
     }
 
 
-def _gpu():
+def _gpu(device):
     """The GPU, read without creating a CUDA context in this process."""
     from importlib.metadata import version
 
-    name, memory, driver = (
-        subprocess.run(
-            [
-                "nvidia-smi",
-                "--id=0",
-                "--query-gpu=name,memory.total,driver_version",
-                "--format=csv,noheader",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        .stdout.strip()
-        .split(", ")
-    )
+    output = subprocess.run(
+        [
+            "nvidia-smi",
+            f"--id={device}",
+            "--query-gpu=name,memory.total,driver_version",
+            "--format=csv,noheader",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    [[name, memory, driver]] = csv.reader(io.StringIO(output), skipinitialspace=True)
     return {"name": name, "memory": memory, "driver": driver, "torch": version("torch")}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0].strip())
+    parser.add_argument(
+        "--device",
+        default="0",
+        help="the GPU to test, an index or a UUID as nvidia-smi names it",
+    )
     parser.add_argument(
         "--cap-mb", type=int, default=2048, help="memory cap of the capped worker"
     )
@@ -237,11 +244,14 @@ def main():
 
     from cogito.gpu import mps_running
 
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "0")
+    # One GPU, the one the report describes: the checks expect a single device.
+    # PCI bus order numbers the GPUs as nvidia-smi does.
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.device
     mps = mps_running()
     report = {
         "python": platform.python_version(),
-        "gpu": _gpu(),
+        "gpu": _gpu(args.device),
         "mps": mps,
         "memory": check_memory(mps, args.cap_mb),
     }

@@ -907,6 +907,8 @@ IPC_PREDICTORS = {
                 pass
 
             def predict(self, kind: str):
+                if kind == "none":
+                    return {"ok": True}
                 if kind == "torch":
                     raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
                 raise RuntimeError("CUDA error: out of memory")
@@ -1075,6 +1077,7 @@ def test_out_of_memory_is_confined_to_its_predictor(ipc_predictors_path, workers
     assert result == {"text": "HELLO", "length": 5}
     assert sdxl.is_alive() and model.is_alive()
     # Both keep serving after the out-of-memory error.
+    assert asyncio.run(sdxl.predict({"kind": "none"})) == {"ok": True}
     assert asyncio.run(model.predict(TextInput(text="again"))) == {
         "text": "AGAIN",
         "length": 5,
